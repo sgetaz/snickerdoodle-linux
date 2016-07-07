@@ -24,6 +24,7 @@
 #include <linux/module.h>
 #include <linux/hrtimer.h>
 #include <linux/kmemleak.h>
+#include <asm/outercache.h>
 
 #ifdef DEBUG
 /* For development, we want to crash whenever the ring is screwed. */
@@ -422,6 +423,16 @@ bool virtqueue_notify(struct virtqueue *_vq)
 {
 	struct vring_virtqueue *vq = to_vvq(_vq);
 
+#define RPMSG_MEM_MASK 0xFFFFFF
+    unsigned int ring_flush = (unsigned int)vq->vring.desc & RPMSG_MEM_MASK;
+    unsigned int ring_used_flush = (unsigned int)vq->vring.used & RPMSG_MEM_MASK;
+    unsigned int data_flush = (unsigned int)vq->vring.desc->addr & RPMSG_MEM_MASK;
+    unsigned int data_size = vq->vring.num * vq->vring.desc->len; // (number of buffers) * (data length)
+    unsigned int vring_tot_size = ALIGN(vring_size(256, 0x1), 0x1000);
+    outer_cache.flush_range(ring_flush, ring_flush + vring_tot_size);
+    outer_cache.flush_range(ring_used_flush, ring_used_flush + vring_tot_size);
+    outer_cache.flush_range(data_flush, data_flush + data_size);
+
 	if (unlikely(vq->broken))
 		return false;
 
@@ -729,6 +740,12 @@ EXPORT_SYMBOL_GPL(virtqueue_detach_unused_buf);
 irqreturn_t vring_interrupt(int irq, void *_vq)
 {
 	struct vring_virtqueue *vq = to_vvq(_vq);
+
+    #define RPMSG_MEM_MASK 0xFFFFFF
+    unsigned int data_size = vq->vring.num * vq->vring.desc->len; // (number of buffers) * (data length)
+    unsigned int vring_tot_size = ALIGN(vring_size(256, 0x1), 0x1000);
+    outer_cache.flush_range((unsigned int)vq->vring.used & RPMSG_MEM_MASK, ((unsigned int)vq->vring.used & RPMSG_MEM_MASK) + vring_tot_size);
+    outer_cache.flush_range((unsigned int)vq->vring.desc->addr & RPMSG_MEM_MASK, ((unsigned int)vq->vring.desc->addr & RPMSG_MEM_MASK) + data_size);
 
 	if (!more_used(vq)) {
 		pr_debug("virtqueue interrupt with no work for %p\n", vq);
