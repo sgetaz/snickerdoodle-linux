@@ -1,0 +1,14 @@
+--- drivers/of/Kconfig
++++ drivers/of/Kconfig
+@@ -91,4 +91,11 @@
+ 	select OF_DEVICE
+ 	select OF_RESOLVE
+ 
++config OF_CONFIGFS
++	bool "OpenFirmware Overlay ConfigFS interface"
++	select CONFIGFS_FS
++	select OF_OVERLAY
++	help
++	  Enable a simple user-space driver DT overlay interface.
++
+ endmenu # OF

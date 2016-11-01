@@ -14,5 +14,11 @@ obj-$(CONFIG_OF_MTD)	+= of_mtd.o
 obj-$(CONFIG_OF_RESERVED_MEM) += of_reserved_mem.o
 obj-$(CONFIG_OF_RESOLVE)  += resolver.o
 obj-$(CONFIG_OF_OVERLAY) += overlay.o
+obj-$(CONFIG_OF_CONFIGFS) += configfs.o
+
+CFLAGS_dynamic.o := -DDEBUG
+CFLAGS_fdt.o := -DDEBUG
+CFLAGS_overlay.o := -DDEBUG
+CFLAGS_configfs.o := -DDEBUG
 
 obj-$(CONFIG_OF_UNITTEST) += unittest-data/
