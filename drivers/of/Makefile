@@ -1,3 +1,5 @@
+ccflags-$(CONFIG_OF_DEBUG) := -DDEBUG
+
 obj-y = base.o device.o platform.o
 obj-$(CONFIG_OF_DYNAMIC) += dynamic.o
 obj-$(CONFIG_OF_FLATTREE) += fdt.o
@@ -15,10 +17,5 @@ obj-$(CONFIG_OF_RESERVED_MEM) += of_reserved_mem.o
 obj-$(CONFIG_OF_RESOLVE)  += resolver.o
 obj-$(CONFIG_OF_OVERLAY) += overlay.o
 obj-$(CONFIG_OF_CONFIGFS) += configfs.o
-
-CFLAGS_dynamic.o := -DDEBUG
-CFLAGS_fdt.o := -DDEBUG
-CFLAGS_overlay.o := -DDEBUG
-CFLAGS_configfs.o := -DDEBUG
 
 obj-$(CONFIG_OF_UNITTEST) += unittest-data/

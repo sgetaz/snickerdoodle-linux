@@ -11,6 +11,14 @@ menuconfig OF
 
 if OF
 
+config OF_DEBUG
+	bool "Debug support of device tree and open firmware drivers"
+        depends on DEBUG_KERNEL
+        help
+          Say "yes" to enable debug messaging (like dev_dbg and pr_debug),
+          sysfs, and debugfs support.
+
+
 config OF_UNITTEST
 	bool "Device Tree runtime unit tests"
 	depends on OF_IRQ
