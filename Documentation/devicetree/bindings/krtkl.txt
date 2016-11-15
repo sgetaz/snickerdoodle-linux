@@ -1,0 +1,17 @@
+Example:
+
+&amba {
+	fpga-axi@0 {
+		compatible = "simple-bus";
+		#address-cells = <0x1>;
+		#size-cells = <0x1>;
+		ranges;
+
+		krtkl-listener@43c00000 {
+			status = "okay";
+			compatible = "krtkl,lstnr";
+			krtkl,cmd_if_addr  = <0x43c00000>;
+			krtkl,data_if_addr = <0x7AA00000>;
+		};
+	};
+};

@@ -537,6 +537,11 @@ config XILINX_TRAFGEN
 
 	  If unsure, say N
 
+config KRTKL_LISTENER
+	tristate "Krtkl ASCII Listener"
+	help
+	  This option enabled the driver to the Krtkl Listener IP core.
+
 source "drivers/misc/jesd204b/Kconfig"
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
