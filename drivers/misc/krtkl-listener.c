@@ -1,20 +1,20 @@
-/**
- *  Copyright (c) 2016 krtkl inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- */
+/*
+*  Copyright (C) 2016 krtkl inc.
+*
+* This program is free software; you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation; either version 2 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with this program; if not, write to the Free Software
+* Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -38,9 +38,10 @@
 #define KRTKL_LSTNR_CMD_REQ_VAL  0x0001
 #define KRTKL_LSTNR_CMD_RDY_VAL  0x0001
 
-/* Waiting for data limits */
-#define KRTKL_LSTNR_MAX_RD_TIME  500
-#define KRTKL_LSTNR_RD_INVERVAL  100
+#define KRTKL_LSTNR_BRAM_SIZE    0x800
+
+/* Waiting for data definitions */
+#define KRTKL_LSTNR_RD_INTERVAL  10
 
 struct krtkl_lstnr_regs {
 	union {
@@ -68,6 +69,9 @@ struct krtkl_lstnr {
 	struct class *char_class;
 	struct cdev *char_cdev;
 	struct mutex lock;
+
+	uint32_t bram_available;
+	uint32_t bram_read;
 
 	struct krtkl_lstnr_regs __iomem *regs;
 	void __iomem *data;
@@ -105,111 +109,72 @@ static ssize_t krtkl_lstnr_read(struct file *file,
 				size_t length,
 				loff_t *offset)
 {
-	uint32_t pos;
-	uint32_t size;
-	uint32_t total_slept;
-	uint8_t  cp_padding;
+	uint32_t bram_left;
+	uint32_t cp_size;
 
-	/* Set reading offset */
-	pos = *offset;
+	/* Always ignore the offset */
+	*offset = 0;
 
-	/* Check if request is aligned to 4B */
-	if (pos % 4 || length % 4)
+	/* Calculate leftovers from the previous transfer */
+	bram_left = krtkl_lstnr.bram_available - krtkl_lstnr.bram_read;
+
+	/* Copy what's available (at least 4 bytes) */
+	if (bram_left > 0) {
+		cp_size = (bram_left >= length) ? length : bram_left;
+
+		/* Copy the data to userspace */
+		if (copy_to_user(buffer,
+				 krtkl_lstnr.data + krtkl_lstnr.bram_read,
+				 cp_size))
+			return -EFAULT;
+
+		krtkl_lstnr.bram_read += cp_size;
+
+		/* Return success if copied anything */
+		return cp_size;
+	}
+
+	/* New request is needed - check if new data is available */
+	if (krtkl_lstnr.regs->fifo_cnt == 0) {
+		/* Fail if there is no new data and the read is non-blocking */
+		if (file->f_flags & O_NONBLOCK)
+			return 0;
+
+		/* Otherwise wait for new data (at least 4 bytes)  */
+		while (krtkl_lstnr.regs->fifo_cnt < 4)
+			msleep(KRTKL_LSTNR_RD_INTERVAL);
+	}
+
+	/* Trigger a FIFO->BRAM transfer request */
+	krtkl_lstnr.regs->ctrl |= KRTKL_LSTNR_CMD_REQ_VAL;
+
+	/* Wait for the ready bit */
+	while (!(krtkl_lstnr.regs->status & KRTKL_LSTNR_CMD_RDY_VAL))
+		msleep(KRTKL_LSTNR_RD_INTERVAL);
+
+	krtkl_lstnr.bram_available = krtkl_lstnr.regs->data_size;
+	krtkl_lstnr.bram_read = 0;
+
+	bram_left = krtkl_lstnr.bram_available;
+
+	cp_size = (bram_left >= length) ? length : bram_left;
+	/* Align to 4 bytes */
+	while (cp_size % 4)
+		cp_size--;
+
+	krtkl_lstnr.bram_read += cp_size;
+
+	/* Copy the data to user */
+	if (copy_to_user(buffer, krtkl_lstnr.data, cp_size))
 		return -EFAULT;
 
-	/* Check if it wants to read anything */
-	if (!length)
-		return 0;
-
-	/* Check if there is enough data in the fifo if call is non-blocking */
-	if (file->f_flags & O_NONBLOCK) {
-		if (krtkl_lstnr.regs->fifo_cnt < length)
-			return -EWOULDBLOCK;
-
-		if (length > krtkl_lstnr.regs->max_read_size)
-			return -EINVAL;
-	}
-
-	/* Perform request and BRAM read if needed */
-	if (pos == 0) {
-		/* Send FIFO to BRAM transfer request */
-		krtkl_lstnr.regs->ctrl |= KRTKL_LSTNR_CMD_REQ_VAL;
-
-		/* Wait for the transfer to finish */
-		total_slept = 0;
-		while (!(krtkl_lstnr.regs->status & KRTKL_LSTNR_CMD_RDY_VAL)) {
-			if (total_slept <= KRTKL_LSTNR_MAX_RD_TIME) {
-				msleep(KRTKL_LSTNR_RD_INVERVAL);
-				total_slept += KRTKL_LSTNR_RD_INVERVAL;
-			} else {
-				return -ETIMEDOUT;
-			}
-		}
-	}
-
-	/* Check how much data there is yet to read */
-	size = krtkl_lstnr.regs->data_size;
-
-	if (size == 0)
-		return -ENODATA;
-
-	/* Check if anything is left to be read */
-	if (pos >= size)
-		return 0;
-
-	/* Check read limits */
-	if ((pos + length) >= size)
-		length = (size - pos);
-
-	/* Make sure it is aligned to 4B */
-	cp_padding = 0;
-	while (length % 4) {
-		length++;
-		cp_padding++;
-	}
-
-	/* Copy the data to userspace */
-	if (copy_to_user(buffer, krtkl_lstnr.data + pos, length))
-		return -EFAULT;
-
-	/* Keep the offset aligned to 4B in case it's the last iteration */
-	pos += length;
-	*offset = pos;
-
-	/* But return the number bytes that are actually valid */
-	return length - cp_padding;
-}
-
-static loff_t krtkl_lstnr_llseek(struct file *file, loff_t offset, int orig)
-{
-	loff_t ret;
-
-	mutex_lock(&file_inode(file)->i_mutex);
-	switch (orig) {
-	case SEEK_CUR:
-		offset += file->f_pos;
-	case SEEK_SET:
-		/* To avoid userland mistaking f_pos=-9 as -EBADF=-9 */
-		if (IS_ERR_VALUE((unsigned long long)offset)) {
-			ret = -EOVERFLOW;
-			break;
-		}
-		file->f_pos = offset;
-		ret = file->f_pos;
-		break;
-	default:
-		ret = -EINVAL;
-	}
-	mutex_unlock(&file_inode(file)->i_mutex);
-
-	return ret;
+	return cp_size;
 }
 
 const struct file_operations krtkl_lstnr_fops = {
 	.open    = krtkl_lstnr_open,
 	.read    = krtkl_lstnr_read,
 	.release = krtkl_lstnr_release,
-	.llseek  = krtkl_lstnr_llseek,
 };
 
 static int krtkl_lstnr_probe(struct platform_device *pdev)
@@ -244,7 +209,7 @@ static int krtkl_lstnr_probe(struct platform_device *pdev)
 	}
 
 	/* Map AXI data interface */
-	phys_len = 0x10000; /* FIXME */
+	phys_len = KRTKL_LSTNR_BRAM_SIZE;
 	result = of_property_read_u32(devnode,
 				      "krtkl,data_if_addr",
 				      &phys_addr);
@@ -371,5 +336,5 @@ module_init(krtkl_lstnr_init);
 module_exit(krtkl_lstnr_exit);
 
 MODULE_AUTHOR("Tomasz Gorochowik");
-MODULE_DESCRIPTION("krtkl Listener Driver");
+MODULE_DESCRIPTION("Krtkl Listener Driver");
 MODULE_LICENSE("GPL v2");
