@@ -90,9 +90,6 @@ void sdhci_get_of_property(struct platform_device *pdev)
 	if (of_get_property(np, "no-1-8-v", NULL))
 		host->quirks2 |= SDHCI_QUIRK2_NO_1_8_V;
 
-	if (of_get_property(np, "broken-tuning", NULL))
-		host->quirks2 |= SDHCI_QUIRK2_BROKEN_TUNING;
-
 	if (of_device_is_compatible(np, "fsl,p2020-rev1-esdhc"))
 		host->quirks |= SDHCI_QUIRK_BROKEN_DMA;
 
@@ -110,7 +107,8 @@ void sdhci_get_of_property(struct platform_device *pdev)
 	if (of_find_property(np, "keep-power-in-suspend", NULL))
 		host->mmc->pm_caps |= MMC_PM_KEEP_POWER;
 
-	if (of_find_property(np, "enable-sdio-wakeup", NULL))
+	if (of_property_read_bool(np, "wakeup-source") ||
+	    of_property_read_bool(np, "enable-sdio-wakeup")) /* legacy */
 		host->mmc->pm_caps |= MMC_PM_WAKE_SDIO_IRQ;
 }
 #else

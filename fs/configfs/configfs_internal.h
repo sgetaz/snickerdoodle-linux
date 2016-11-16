@@ -73,7 +73,8 @@ extern struct inode * configfs_new_inode(umode_t mode, struct configfs_dirent *,
 extern int configfs_create(struct dentry *, umode_t mode, void (*init)(struct inode *));
 
 extern int configfs_create_file(struct config_item *, const struct configfs_attribute *);
-extern int configfs_create_bin_file(struct config_item *, const struct configfs_bin_attribute *);
+extern int configfs_create_bin_file(struct config_item *,
+				    const struct configfs_bin_attribute *);
 extern int configfs_make_dirent(struct configfs_dirent *,
 				struct dentry *, void *, umode_t, int);
 extern int configfs_dirent_is_ready(struct configfs_dirent *);

@@ -42,6 +42,7 @@ static int dwc3_of_simple_probe(struct platform_device *pdev)
 	struct device		*dev = &pdev->dev;
 	struct device_node	*np = dev->of_node;
 
+	unsigned int		count;
 	int			ret;
 	int			i;
 
@@ -49,11 +50,11 @@ static int dwc3_of_simple_probe(struct platform_device *pdev)
 	if (!simple)
 		return -ENOMEM;
 
-	ret = of_clk_get_parent_count(np);
-	if (ret < 0)
-		return ret;
+	count = of_clk_get_parent_count(np);
+	if (!count)
+		return -ENOENT;
 
-	simple->num_clocks = ret;
+	simple->num_clocks = count;
 
 	simple->clks = devm_kcalloc(dev, simple->num_clocks,
 			sizeof(struct clk *), GFP_KERNEL);
@@ -96,6 +97,8 @@ static int dwc3_of_simple_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	platform_set_drvdata(pdev, simple);
+
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
 	pm_runtime_get_sync(dev);
@@ -109,12 +112,12 @@ static int dwc3_of_simple_remove(struct platform_device *pdev)
 	struct device		*dev = &pdev->dev;
 	int			i;
 
+	of_platform_depopulate(dev);
+
 	for (i = 0; i < simple->num_clocks; i++) {
-		clk_unprepare(simple->clks[i]);
+		clk_disable_unprepare(simple->clks[i]);
 		clk_put(simple->clks[i]);
 	}
-
-	of_platform_depopulate(dev);
 
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);

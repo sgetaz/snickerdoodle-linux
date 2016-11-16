@@ -128,13 +128,12 @@ out:
 	return retval;
 }
 
-
 /**
- *	configfs_read_bin_file - read a binary attribute
- *	@file:		file pointer.
- *	@buf:		buffer to fill.
- *	@count:		number of bytes to read.
- *	@ppos:		starting offset in file.
+ *	configfs_read_bin_file - read a binary attribute.
+ *	@file:	file pointer.
+ *	@buf:	buffer to fill.
+ *	@count:	number of bytes to read.
+ *	@ppos:	starting offset in file.
  *
  *	Userspace wants to read a binary attribute file. The attribute
  *	descriptor is in the file's ->d_fsdata. The target item is in the
@@ -148,8 +147,10 @@ out:
  *	attr->read() again passing that buffer as an argument.
  *	Then we just copy to user-space using simple_read_from_buffer.
  */
+
 static ssize_t
-configfs_read_bin_file(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+configfs_read_bin_file(struct file *file, char __user *buf,
+		       size_t count, loff_t *ppos)
 {
 	struct configfs_buffer *buffer = file->private_data;
 	struct dentry *dentry = file->f_path.dentry;
@@ -160,23 +161,22 @@ configfs_read_bin_file(struct file *file, char __user *buf, size_t count, loff_t
 
 	mutex_lock(&buffer->mutex);
 
-	/* We don't support switching between read and write modes */
+	/* we don't support switching read/write modes */
 	if (buffer->write_in_progress) {
 		retval = -ETXTBSY;
 		goto out;
 	}
-
 	buffer->read_in_progress = 1;
 
 	if (buffer->needs_read_fill) {
-		/* Perform first read with buf == NULL to get extent */
+		/* perform first read with buf == NULL to get extent */
 		len = bin_attr->read(item, NULL, 0);
 		if (len <= 0) {
 			retval = len;
 			goto out;
 		}
 
-		/* Do not exceed the maximum value */
+		/* do not exceed the maximum value */
 		if (bin_attr->cb_max_size && len > bin_attr->cb_max_size) {
 			retval = -EFBIG;
 			goto out;
@@ -187,10 +187,9 @@ configfs_read_bin_file(struct file *file, char __user *buf, size_t count, loff_t
 			retval = -ENOMEM;
 			goto out;
 		}
-
 		buffer->bin_buffer_size = len;
 
-		/* Perform second read to fill buffer */
+		/* perform second read to fill buffer */
 		len = bin_attr->read(item, buffer->bin_buffer, len);
 		if (len < 0) {
 			retval = len;
@@ -205,7 +204,6 @@ configfs_read_bin_file(struct file *file, char __user *buf, size_t count, loff_t
 
 	retval = simple_read_from_buffer(buf, count, ppos, buffer->bin_buffer,
 					buffer->bin_buffer_size);
-
 out:
 	mutex_unlock(&buffer->mutex);
 	return retval;
@@ -297,7 +295,6 @@ configfs_write_file(struct file *file, const char __user *buf, size_t count, lof
 	return len;
 }
 
-
 /**
  *	configfs_write_bin_file - write a binary attribute.
  *	@file:	file pointer
@@ -367,14 +364,13 @@ out:
 	return len;
 }
 
-
 static int check_perm(struct inode * inode, struct file * file, int type)
 {
 	struct config_item *item = configfs_get_config_item(file->f_path.dentry->d_parent);
-	struct configfs_attribute *attr = to_attr(file->f_path.dentry);
+	struct configfs_attribute * attr = to_attr(file->f_path.dentry);
 	struct configfs_bin_attribute *bin_attr = NULL;
-	struct configfs_buffer *buffer;
-	struct configfs_item_operations *ops = NULL;
+	struct configfs_buffer * buffer;
+	struct configfs_item_operations * ops = NULL;
 	int error = 0;
 
 	if (!item || !attr)
@@ -382,7 +378,6 @@ static int check_perm(struct inode * inode, struct file * file, int type)
 
 	if (type & CONFIGFS_ITEM_BIN_ATTR)
 		bin_attr = to_bin_attr(file->f_path.dentry);
-
 
 	/* Grab the module reference for this attribute if we have one */
 	if (!try_module_get(attr->ca_owner)) {
@@ -408,7 +403,6 @@ static int check_perm(struct inode * inode, struct file * file, int type)
 
 		if ((type & CONFIGFS_ITEM_BIN_ATTR) && !bin_attr->write)
 			goto Eaccess;
-
 	}
 
 	/* File needs read support.
@@ -476,6 +470,15 @@ static int configfs_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
+static int configfs_open_file(struct inode *inode, struct file *filp)
+{
+	return check_perm(inode, filp, CONFIGFS_ITEM_ATTR);
+}
+
+static int configfs_open_bin_file(struct inode *inode, struct file *filp)
+{
+	return check_perm(inode, filp, CONFIGFS_ITEM_BIN_ATTR);
+}
 
 static int configfs_release_bin_file(struct inode *inode, struct file *filp)
 {
@@ -502,24 +505,10 @@ static int configfs_release_bin_file(struct inode *inode, struct file *filp)
 	}
 
 	ret = configfs_release(inode, filp);
-
 	if (len < 0)
 		return len;
-
 	return ret;
 }
-
-
-static int configfs_open_file(struct inode *inode, struct file *filp)
-{
-	return check_perm(inode, filp, CONFIGFS_ITEM_ATTR);
-}
-
-static int configfs_open_bin_file(struct inode *inode, struct file *filp)
-{
-	return check_perm(inode, filp, CONFIGFS_ITEM_BIN_ATTR);
-}
-
 
 
 const struct file_operations configfs_file_operations = {
@@ -530,15 +519,13 @@ const struct file_operations configfs_file_operations = {
 	.release	= configfs_release,
 };
 
-
 const struct file_operations configfs_bin_file_operations = {
 	.read		= configfs_read_bin_file,
 	.write		= configfs_write_bin_file,
-	.llseek		= NULL,				/* bin file is not seekable */
+	.llseek		= NULL,		/* bin file is not seekable */
 	.open		= configfs_open_bin_file,
 	.release	= configfs_release_bin_file,
 };
-
 
 /**
  *	configfs_create_file - create an attribute file for an item.
@@ -553,20 +540,20 @@ int configfs_create_file(struct config_item * item, const struct configfs_attrib
 	umode_t mode = (attr->ca_mode & S_IALLUGO) | S_IFREG;
 	int error = 0;
 
-	mutex_lock_nested(&d_inode(dir)->i_mutex, I_MUTEX_NORMAL);
+	inode_lock_nested(d_inode(dir), I_MUTEX_NORMAL);
 	error = configfs_make_dirent(parent_sd, NULL, (void *) attr, mode,
 				     CONFIGFS_ITEM_ATTR);
-	mutex_unlock(&d_inode(dir)->i_mutex);
+	inode_unlock(d_inode(dir));
 
 	return error;
 }
 
-
 /**
- *	configfs_create_bin_file - create a binary attribute filew for an item.
+ *	configfs_create_bin_file - create a binary attribute file for an item.
  *	@item:	item we're creating for.
- *	@attr:	attribute descriptor.
+ *	@attr:	atrribute descriptor.
  */
+
 int configfs_create_bin_file(struct config_item *item,
 		const struct configfs_bin_attribute *bin_attr)
 {
@@ -575,10 +562,10 @@ int configfs_create_bin_file(struct config_item *item,
 	umode_t mode = (bin_attr->cb_attr.ca_mode & S_IALLUGO) | S_IFREG;
 	int error = 0;
 
-	mutex_lock_nested(&dir->d_inode->i_mutex, I_MUTEX_NORMAL);
-	error = configfs_make_dirent(parent_sd, NULL, (void *)bin_attr, mode,
-					CONFIGFS_ITEM_BIN_ATTR);
-	mutex_unlock(&dir->d_inode->i_mutex);
+	inode_lock_nested(dir->d_inode, I_MUTEX_NORMAL);
+	error = configfs_make_dirent(parent_sd, NULL, (void *) bin_attr, mode,
+				     CONFIGFS_ITEM_BIN_ATTR);
+	inode_unlock(dir->d_inode);
 
 	return error;
 }
