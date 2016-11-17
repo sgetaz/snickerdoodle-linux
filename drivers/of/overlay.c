@@ -559,8 +559,7 @@ int of_overlay_destroy(int id)
 
 	of_overlay_notify(ov, OF_OVERLAY_PRE_REMOVE);
 	list_del(&ov->node);
-	of_changeset_revert(&ov->cset);
-	of_overlay_notify(ov, OF_OVERLAY_POST_REMOVE);
+	__of_changeset_revert(&ov->cset);
 	of_free_overlay_info(ov);
 	idr_remove(&ov_idr, id);
 	of_changeset_destroy(&ov->cset);
