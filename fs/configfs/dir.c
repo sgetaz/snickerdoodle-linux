@@ -606,14 +606,6 @@ static int populate_attrs(struct config_item *item)
 		}
 	}
 
-	if (t->ct_bin_attrs) {
-		for (i = 0; (bin_attr = t->ct_bin_attrs[i]) != NULL; i++) {
-			error = configfs_create_bin_file(item, bin_attr);
-			if (error)
-				break;
-		}
-	}
-
 	if (error)
 		detach_attrs(item);
 
