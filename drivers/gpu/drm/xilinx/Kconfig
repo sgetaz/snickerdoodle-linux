@@ -21,3 +21,10 @@ config DRM_XILINX_DP_SUB
 	select DRM_XILINX_DP
 	help
 	  DRM driver for Xilinx Display Port Subsystem.
+
+config DRM_XILINX_DEBUG
+	bool "Debug support for Xilinx DRM drivers"
+	depends on DRM_XILINX
+	help
+	  Say "yes" to enable debug messaging
+

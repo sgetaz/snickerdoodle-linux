@@ -2,6 +2,8 @@
 # Makefile for the drm device driver.  This driver provides support for the
 # Direct Rendering Infrastructure (DRI) in XFree86 4.1.0 and higher.
 
+ccflags-$(CONFIG_DRM_XILINX_DEBUG) := -DDEBUG
+
 xilinx_drm-y := xilinx_drm_crtc.o xilinx_drm_connector.o xilinx_drm_drv.o \
 		xilinx_drm_encoder.o xilinx_drm_fb.o xilinx_drm_gem.o \
 		xilinx_drm_plane.o

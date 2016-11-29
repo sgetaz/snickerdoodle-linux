@@ -29,19 +29,31 @@
 #include <linux/mutex.h>
 #include <linux/delay.h>
 #include <linux/uaccess.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_irq.h>
+#include <linux/completion.h>
 
 #define KRTKL_LSTNR_DEVICE_NAME "krtkl-listener"
 
 /* Request and ready bits are the same bit in the same register */
-#define KRTKL_LSTNR_CMD_REQ_VAL  0x0001
-#define KRTKL_LSTNR_CMD_RDY_VAL  0x0001
+#define KRTKL_LSTNR_CMD_REQ_VAL  		(1<<0)
+#define KRTKL_LSTNR_CMD_RDY_VAL  		(1<<0)
 
-#define KRTKL_LSTNR_BRAM_SIZE    0x800
+#define KRTKL_LSTNR_THRESH_INTERRUPT_ENABLE 	(1<<4)
+#define KRTKL_LSTNR_FRAME_INTERRUPT_ENABLE 	(1<<5)
+#define KRTKL_LSTNR_GLOBAL_INTERRUPT_ENABLE 	(1<<6)
+
+#define KRTKL_LSTNR_FIFO_THRESHOLD_SHIFT		16
+
+#define KRTKL_LSTNR_THRESH_INTERRUPT		(1<<16)
+#define KRTKL_LSTNR_FRAME_INTERRUPT		(1<<17)
+
+#define KRTKL_LSTNR_BRAM_SIZE    		0x800
 
 /* Waiting for data definitions */
-#define KRTKL_LSTNR_RD_INTERVAL  10
+#define KRTKL_LSTNR_RD_INTERVAL  		10
 
 struct krtkl_lstnr_regs {
 	union {
@@ -60,6 +72,7 @@ struct krtkl_lstnr_regs {
 	union {
 		uint32_t slvreg3;
 		uint32_t max_read_size;
+		uint32_t interrupt_status;
 	};
 };
 
@@ -72,12 +85,57 @@ struct krtkl_lstnr {
 
 	uint32_t bram_available;
 	uint32_t bram_read;
+	struct completion data_available;
 
+	int irq;
 	struct krtkl_lstnr_regs __iomem *regs;
 	void __iomem *data;
 };
 
 static struct krtkl_lstnr krtkl_lstnr;
+
+static void krtkl_lstnr_irq_enable(void)
+{
+	uint32_t reg;
+	reg = krtkl_lstnr.regs->ctrl;
+	reg &= ~(KRTKL_LSTNR_CMD_REQ_VAL);
+        reg |= KRTKL_LSTNR_THRESH_INTERRUPT_ENABLE | 	\
+		KRTKL_LSTNR_FRAME_INTERRUPT_ENABLE | 	\
+		KRTKL_LSTNR_GLOBAL_INTERRUPT_ENABLE;
+	krtkl_lstnr.regs->ctrl = reg;
+	/* clear any pending interrupt */
+	krtkl_lstnr.regs->interrupt_status |= KRTKL_LSTNR_THRESH_INTERRUPT | \
+					KRTKL_LSTNR_FRAME_INTERRUPT;
+}
+
+static void krtkl_lstnr_irq_disable(void)
+{
+	uint32_t reg;
+	reg = krtkl_lstnr.regs->ctrl;
+	reg &= ~(KRTKL_LSTNR_CMD_REQ_VAL);
+        reg &= ~(KRTKL_LSTNR_THRESH_INTERRUPT_ENABLE | 	\
+		 KRTKL_LSTNR_FRAME_INTERRUPT_ENABLE | 	\
+		 KRTKL_LSTNR_GLOBAL_INTERRUPT_ENABLE);
+	krtkl_lstnr.regs->ctrl = reg;
+}
+
+static irqreturn_t krtkl_lstnr_irq_handler(int irq, void *data)
+{
+	struct krtkl_lstnr *priv = (struct krtkl_lstnr*) data;
+	int interrupt_reg;
+
+	interrupt_reg = priv->regs->interrupt_status;
+
+	if(interrupt_reg & KRTKL_LSTNR_THRESH_INTERRUPT)
+		priv->regs->interrupt_status |= KRTKL_LSTNR_THRESH_INTERRUPT;
+
+	if(interrupt_reg & KRTKL_LSTNR_FRAME_INTERRUPT)
+		priv->regs->interrupt_status |= KRTKL_LSTNR_FRAME_INTERRUPT;
+
+	complete(&priv->data_available);
+
+	return IRQ_HANDLED;
+}
 
 static int krtkl_lstnr_open(struct inode *inode, struct file *file)
 {
@@ -104,6 +162,7 @@ static int krtkl_lstnr_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+
 static ssize_t krtkl_lstnr_read(struct file *file,
 				char __user *buffer,
 				size_t length,
@@ -111,6 +170,7 @@ static ssize_t krtkl_lstnr_read(struct file *file,
 {
 	uint32_t bram_left;
 	uint32_t cp_size;
+	int ret;
 
 	/* Always ignore the offset */
 	*offset = 0;
@@ -135,23 +195,28 @@ static ssize_t krtkl_lstnr_read(struct file *file,
 	}
 
 	/* New request is needed - check if new data is available */
-	if (krtkl_lstnr.regs->fifo_cnt == 0) {
+	if (krtkl_lstnr.regs->fifo_cnt < 4) {
 		/* Fail if there is no new data and the read is non-blocking */
 		if (file->f_flags & O_NONBLOCK)
 			return 0;
 
 		/* Otherwise wait for new data (at least 4 bytes)  */
-		while (krtkl_lstnr.regs->fifo_cnt < 4)
-			msleep(KRTKL_LSTNR_RD_INTERVAL);
+		krtkl_lstnr_irq_enable();
+		ret = wait_for_completion_killable(&krtkl_lstnr.data_available);
+		krtkl_lstnr_irq_disable();
+
+		/* ir we were interrupted, return 0 */
+		if (ret) return 0;
 	}
 
 	/* Trigger a FIFO->BRAM transfer request */
 	krtkl_lstnr.regs->ctrl |= KRTKL_LSTNR_CMD_REQ_VAL;
 
-	/* Wait for the ready bit */
+	/* Wait for the ready bit.
+	   This shold not take long, so we can simple poll for the bit
+	   instead of implementing it as an interrupt */
 	while (!(krtkl_lstnr.regs->status & KRTKL_LSTNR_CMD_RDY_VAL))
 		msleep(KRTKL_LSTNR_RD_INTERVAL);
-
 	krtkl_lstnr.bram_available = krtkl_lstnr.regs->data_size;
 	krtkl_lstnr.bram_read = 0;
 
@@ -181,6 +246,8 @@ static int krtkl_lstnr_probe(struct platform_device *pdev)
 {
 	struct device_node *devnode = pdev->dev.of_node;
 	int result;
+	int err;
+	uint32_t reg;
 	uint32_t phys_addr;
 	uint32_t phys_len;
 
@@ -233,6 +300,19 @@ static int krtkl_lstnr_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
+	/* Get the interrupt */
+	krtkl_lstnr.irq = irq_of_parse_and_map(devnode, 0);
+
+	err = request_irq(krtkl_lstnr.irq, krtkl_lstnr_irq_handler, IRQF_SHARED,
+				"krtkl-listener", &krtkl_lstnr);
+
+	if (err) {
+		dev_err(&pdev->dev, "unable to request IRQ %d \n", krtkl_lstnr.irq);
+		return err;
+	}
+
+	init_completion(&krtkl_lstnr.data_available);
+
 	/* Init chardev helpers */
 	krtkl_lstnr.device_open = 0;
 	mutex_init(&krtkl_lstnr.lock);
@@ -279,6 +359,13 @@ static int krtkl_lstnr_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Failed to create device node\n");
 		goto fail_create_device;
 	}
+
+	/* Set the default threshold*/
+	reg = krtkl_lstnr.regs->ctrl;
+	reg &= ~(KRTKL_LSTNR_CMD_REQ_VAL);
+	reg |= (KRTKL_LSTNR_BRAM_SIZE/2-1) << KRTKL_LSTNR_FIFO_THRESHOLD_SHIFT;
+	krtkl_lstnr.regs->ctrl = reg;
+
 	return 0;
 
 fail_create_device:
