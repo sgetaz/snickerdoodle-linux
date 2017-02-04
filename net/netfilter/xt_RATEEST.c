@@ -14,8 +14,25 @@
 #include <net/netfilter/xt_rateest.h>
 
 
-static bool
-xt_rateest_mt(const struct sk_buff *skb, struct xt_action_param *par)
+#define RATEEST_HSIZE	16
+static struct hlist_head rateest_hash[RATEEST_HSIZE] __read_mostly;
+static unsigned int jhash_rnd __read_mostly;
+
+static unsigned int xt_rateest_hash(const char *name)
+{
+	return jhash(name, FIELD_SIZEOF(struct xt_rateest, name), jhash_rnd) &
+	       (RATEEST_HSIZE - 1);
+}
+
+static void xt_rateest_hash_insert(struct xt_rateest *est)
+{
+	unsigned int h;
+
+	h = xt_rateest_hash(est->name);
+	hlist_add_head(&est->list, &rateest_hash[h]);
+}
+
+struct xt_rateest *xt_rateest_lookup(const char *name)
 {
 	const struct xt_rateest_match_info *info = par->matchinfo;
 	struct gnet_stats_rate_est64 *r;
@@ -76,9 +93,15 @@ xt_rateest_mt(const struct sk_buff *skb, struct xt_action_param *par)
 
 static int xt_rateest_mt_checkentry(const struct xt_mtchk_param *par)
 {
-	struct xt_rateest_match_info *info = par->matchinfo;
-	struct xt_rateest *est1, *est2;
-	int ret = -EINVAL;
+	struct xt_rateest_target_info *info = par->targinfo;
+	struct xt_rateest *est;
+	struct {
+		struct nlattr		opt;
+		struct gnet_estimator	est;
+	} cfg;
+	int ret;
+
+	net_get_random_once(&jhash_rnd, sizeof(jhash_rnd));
 
 	if (hweight32(info->flags & (XT_RATEEST_MATCH_ABS |
 				     XT_RATEEST_MATCH_REL)) != 1)
@@ -101,12 +124,10 @@ static int xt_rateest_mt_checkentry(const struct xt_mtchk_param *par)
 	if (!est1)
 		goto err1;
 
-	est2 = NULL;
-	if (info->flags & XT_RATEEST_MATCH_REL) {
-		est2 = xt_rateest_lookup(info->name2);
-		if (!est2)
-			goto err2;
-	}
+	ret = gen_new_estimator(&est->bstats, NULL, &est->rstats,
+				&est->lock, NULL, &cfg.opt);
+	if (ret < 0)
+		goto err2;
 
 	info->est1 = est1;
 	info->est2 = est2;

@@ -33,6 +33,8 @@
 #include <linux/slab.h>
 #include <linux/cpu.h>
 #include <linux/delay.h>
+#include <linux/list.h>
+#include <linux/genalloc.h>
 
 #include "remoteproc_internal.h"
 
@@ -75,9 +77,6 @@
 #define RPU_0_IPI_MASK		RPU_IPI_MASK(0)
 #define RPU_1_IPI_MASK		RPU_IPI_MASK(1)
 
-/* Store rproc for IPI handler */
-static struct platform_device *remoteprocdev[MAX_INSTANCES];
-
 /* Register access macros */
 #define reg_read(base, reg) \
 	readl(((void __iomem *)(base)) + (reg))
@@ -86,48 +85,16 @@ static struct platform_device *remoteprocdev[MAX_INSTANCES];
 
 #define DEFAULT_FIRMWARE_NAME	"rproc-rpu-fw"
 
+/* Maximum on chip memories used by the driver*/
+#define MAX_ON_CHIP_MEMS        32
+
 /* Module parameter */
 static char *firmware = "r5_0_firmware";
 static char *firmware1 = "r5_1_firmware";
 
+static bool autoboot __read_mostly = true;
+
 struct zynqmp_r5_rproc_pdata;
-
-/**
- * struct ipi_ops - IPI operation handlers
- * @clear:          Clear IPI
- * @reset:          Reset IPI channel
- * @set_mask:       Destination mask
- * @trigger:        Trigger IPI
- */
-struct ipi_ops {
-	irqreturn_t (*clear)(struct zynqmp_r5_rproc_pdata *pdata);
-	void (*reset)(struct zynqmp_r5_rproc_pdata *pdata);
-	void (*set_mask)(struct zynqmp_r5_rproc_pdata *pdata);
-	void (*trigger)(struct zynqmp_r5_rproc_pdata *pdata);
-};
-
-/**
- * struct rpu_ops - RPU operation handlers
- * @bootdev:        Boot device
- * @core_conf:      Core configuration
- * @halt:           Enable/Disable halt
- * @en_reset:       Enable/Disable reset
- * @en_clock:       Enable clock
- */
-struct rpu_ops {
-	void (*bootdev)(struct zynqmp_r5_rproc_pdata *pdata);
-	void (*core_conf)(struct zynqmp_r5_rproc_pdata *pdata);
-	void (*halt)(struct zynqmp_r5_rproc_pdata *pdata, bool do_halt);
-	void (*en_reset)(struct zynqmp_r5_rproc_pdata *pdata, bool do_reset);
-	void (*en_clock)(struct zynqmp_r5_rproc_pdata *pdata);
-};
-
-/* enumerations for RPU/IPI control methods */
-enum control_method {
-	SMC = 0,
-	HVC,
-	HW,
-};
 
 /* enumerations for R5 boot device */
 enum rpu_bootmem {
@@ -141,11 +108,17 @@ enum rpu_core_conf {
 	SPLIT,
 };
 
+/* On-chip memory pool element */
+struct mem_pool_st {
+	struct list_head node;
+	struct gen_pool *pool;
+};
+
 /**
  * struct zynqmp_r5_rproc_pdata - zynqmp rpu remote processor instance state
  * @rproc: rproc handle
- * @ipi_ops: IPI related operation handlers
- * @rpu_ops: RPU related operation handlers
+ * @fw_ops: local firmware operations
+ * @defaulta_fw_ops: default rproc firmware operations
  * @workqueue: workqueue for the RPU remoteproc
  * @rpu_base: virt ptr to RPU control address registers
  * @crl_apb_base: virt ptr to CRL_APB address registers for RPU
@@ -158,42 +131,27 @@ enum rpu_core_conf {
  */
 struct zynqmp_r5_rproc_pdata {
 	struct rproc *rproc;
-	struct ipi_ops *ipi_ops;
-	struct rpu_ops *rpu_ops;
+	struct rproc_fw_ops fw_ops;
+	const struct rproc_fw_ops *default_fw_ops;
 	struct work_struct workqueue;
 	void __iomem *rpu_base;
 	void __iomem *crl_apb_base;
 	void __iomem *ipi_base;
 	enum rpu_core_conf rpu_mode;
 	enum rpu_bootmem bootmem;
+	struct list_head mem_pools;
+	struct list_head mems;
 	u32 ipi_dest_mask;
 	u32 rpu_id;
 	u32 vring0;
 };
 
-/* Get firmware ELF file entry address */
-static int get_firmware_entry_addr(struct zynqmp_r5_rproc_pdata *pdata,
-			u32 *elf_entry_p)
-{
-	struct elf32_hdr *ehdr = 0;
-	const struct firmware *firmware_p;
-	struct rproc *rproc = pdata->rproc;
-	int ret;
-
-	ret = request_firmware(&firmware_p, rproc->firmware, &rproc->dev);
-	if (ret < 0) {
-		dev_err(&rproc->dev, "%s: request_firmware failed: %d\n",
-			__func__, ret);
-		return ret;
-	}
-	ehdr = (struct elf32_hdr *)firmware_p->data;
-	*elf_entry_p = (unsigned int)ehdr->e_entry;
-	release_firmware(firmware_p);
-	return 0;
-}
-
-/*
- * TODO: Update HW RPU operation when the driver is ready
+/**
+ * r5_boot_addr_config - configure the boot address of R5
+ * @pdata: platform data
+ *
+ * This function will set the boot address based on if the
+ * boot memory in the ELF file is TCM or OCM
  */
 static void hw_r5_boot_dev(struct zynqmp_r5_rproc_pdata *pdata)
 {
@@ -279,84 +237,37 @@ static void hw_r5_enable_clock(struct zynqmp_r5_rproc_pdata *pdata)
 	}
 }
 
-static struct rpu_ops rpu_hw_ops = {
-	.bootdev       = hw_r5_boot_dev,
-	.core_conf     = hw_r5_core_config,
-	.halt          = hw_r5_halt,
-	.en_reset      = hw_r5_reset,
-	.en_clock      = hw_r5_enable_clock,
-};
-
-static void smc_r5_boot_dev(struct zynqmp_r5_rproc_pdata *pdata)
+/**
+ * r5_request_tcm - request access to TCM
+ * @pdata: platform data
+ *
+ * Request access to TCM
+ */
+static int r5_request_tcm(struct zynqmp_r5_rproc_pdata *pdata)
 {
-	pr_err("%s: atf smc to be implemented\n", __func__);
+	r5_enable_clock(pdata);
+	r5_reset(pdata, false);
+
+	return 0;
 }
 
-static void smc_r5_reset(struct zynqmp_r5_rproc_pdata *pdata,
-						bool do_reset)
+/**
+ * r5_release_tcm - release TCM
+ * @pdata: platform data
+ *
+ * Release TCM
+ */
+
+static void r5_release_tcm(struct zynqmp_r5_rproc_pdata *pdata)
 {
-	pr_err("%s: atf smc to be implemented\n", __func__);
+	r5_reset(pdata, true);
 }
 
-static void smc_r5_halt(struct zynqmp_r5_rproc_pdata *pdata,
-						bool do_halt)
-{
-	pr_err("%s: atf smc to be implemented\n", __func__);
-}
-
-static void smc_r5_core_config(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: atf smc to be implemented\n", __func__);
-}
-
-static void smc_r5_enable_clock(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: atf smc to be implemented\n", __func__);
-}
-
-static struct rpu_ops rpu_smc_ops = {
-	.bootdev       = smc_r5_boot_dev,
-	.core_conf     = smc_r5_core_config,
-	.halt          = smc_r5_halt,
-	.en_reset      = smc_r5_reset,
-	.en_clock      = smc_r5_enable_clock,
-};
-
-static void hvc_r5_boot_dev(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static void hvc_r5_reset(struct zynqmp_r5_rproc_pdata *pdata, bool do_reset)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static void hvc_r5_halt(struct zynqmp_r5_rproc_pdata *pdata, bool do_halt)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static void hvc_r5_core_config(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static void hvc_r5_enable_clock(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static struct rpu_ops rpu_hvc_ops = {
-	.bootdev       = hvc_r5_boot_dev,
-	.core_conf     = hvc_r5_core_config,
-	.halt          = hvc_r5_halt,
-	.en_reset      = hvc_r5_reset,
-	.en_clock      = hvc_r5_enable_clock,
-};
-
-/*
- * TODO: Update HW ipi operation when the driver is ready
+/**
+ * ipi_init - Initialize R5 IPI
+ * @pdata: platform data
+ *
+ * Clear IPI interrupt status register and then enable IPI interrupt.
  */
 static irqreturn_t hw_clear_ipi(struct zynqmp_r5_rproc_pdata *pdata)
 {
@@ -387,119 +298,26 @@ static void hw_set_ipi_mask(struct zynqmp_r5_rproc_pdata *pdata)
 	reg_write(pdata->ipi_base, IER_OFFSET, pdata->ipi_dest_mask);
 }
 
-static void hw_trigger_ipi(struct zynqmp_r5_rproc_pdata *pdata)
+static void handle_event_notified(struct work_struct *work)
 {
-	pr_debug("%s: dest %08x\n", __func__, pdata->ipi_dest_mask);
-	reg_write(pdata->ipi_base, TRIG_OFFSET, pdata->ipi_dest_mask);
-}
+	struct zynqmp_r5_rproc_pdata *local = container_of(
+				work, struct zynqmp_r5_rproc_pdata,
+				workqueue);
 
-static void ipi_init(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_debug("%s\n", __func__);
-	pdata->ipi_ops->reset(pdata);
-	pdata->ipi_ops->set_mask(pdata);
-}
-
-static struct ipi_ops ipi_hw_ops = {
-	.clear          = hw_clear_ipi,
-	.reset          = hw_ipi_reset,
-	.set_mask       = hw_set_ipi_mask,
-	.trigger        = hw_trigger_ipi,
-};
-
-static irqreturn_t smc_clear_ipi(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: atf smc to be implemented\n", __func__);
-	return IRQ_NONE;
-}
-
-static void smc_ipi_reset(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: atf smc to be implemented\n", __func__);
-}
-
-static void smc_set_ipi_mask(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: atf smc to be implemented\n", __func__);
-}
-
-static void smc_trigger_ipi(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: atf smc to be implemented\n", __func__);
-}
-
-static struct ipi_ops ipi_smc_ops = {
-	.clear          = smc_clear_ipi,
-	.reset          = smc_ipi_reset,
-	.set_mask       = smc_set_ipi_mask,
-	.trigger        = smc_trigger_ipi,
-};
-
-static irqreturn_t hvc_clear_ipi(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-	return IRQ_NONE;
-}
-
-static void hvc_ipi_reset(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static void hvc_set_ipi_mask(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static void hvc_trigger_ipi(struct zynqmp_r5_rproc_pdata *pdata)
-{
-	pr_err("%s: hypervisor hvc to be implemented\n", __func__);
-}
-
-static struct ipi_ops ipi_hvc_ops = {
-	.clear          = hvc_clear_ipi,
-	.reset          = hvc_ipi_reset,
-	.set_mask       = hvc_set_ipi_mask,
-	.trigger        = hvc_trigger_ipi,
-};
-
-static void handle_event(struct zynqmp_r5_rproc_pdata *local)
-{
 	if (rproc_vq_interrupt(local->rproc, 0) == IRQ_NONE)
-		dev_dbg(&remoteprocdev[local->rpu_id]->dev, \
+		dev_dbg(local->rproc->dev.parent,
 			"no message found in vqid 0\n");
 }
 
-static void handle_event0(struct work_struct *work)
-{
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(remoteprocdev[0]);
-
-	handle_event(local);
-}
-
-static void handle_event1(struct work_struct *work)
-{
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(remoteprocdev[1]);
-
-	handle_event(local);
-}
 
 static int zynqmp_r5_rproc_start(struct rproc *rproc)
 {
 	struct device *dev = rproc->dev.parent;
-	struct platform_device *pdev = to_platform_device(dev);
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(pdev);
-	u32 bootaddr = 0;
-	int ret;
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
 
 	dev_dbg(dev, "%s\n", __func__);
-	/* limit to two RPU support */
 	if (local->rpu_id == 0)
-		INIT_WORK(&local->workqueue, handle_event0);
-	else
-		INIT_WORK(&local->workqueue, handle_event1);
-
-	remoteprocdev[local->rpu_id] = pdev;
+		INIT_WORK(&local->workqueue, handle_event_notified);
 
 	/*
 	 * Use memory barrier to make sure all write memory operations
@@ -507,28 +325,23 @@ static int zynqmp_r5_rproc_start(struct rproc *rproc)
 	 */
 	wmb();
 	/* Set up R5 */
-	ret = get_firmware_entry_addr(local, &bootaddr);
-	if (ret < 0) {
-		dev_err(dev, "%s: failed to get RPU boot addr.\n", __func__);
-		return ret;
-	}
-	if (!bootaddr)
-		local->bootmem = TCM;
-	else
+	if ((rproc->bootaddr & 0xF0000000) == 0xF0000000)
 		local->bootmem = OCM;
+	else
+		local->bootmem = TCM;
 	dev_info(dev, "RPU boot from %s.",
 		local->bootmem == OCM ? "OCM" : "TCM");
 
-	local->rpu_ops->core_conf(local);
-	local->rpu_ops->halt(local, true);
-	local->rpu_ops->en_reset(local, true);
-	local->rpu_ops->bootdev(local);
+	ipi_init(local);
+	r5_mode_config(local);
+	r5_halt(local, true);
+	r5_reset(local, true);
+	r5_boot_addr_config(local);
 	/* Add delay before release from halt and reset */
 	udelay(500);
 	local->rpu_ops->en_reset(local, false);
 	local->rpu_ops->halt(local, false);
 
-	ipi_init(local);
 	return 0;
 }
 
@@ -536,8 +349,7 @@ static int zynqmp_r5_rproc_start(struct rproc *rproc)
 static void zynqmp_r5_rproc_kick(struct rproc *rproc, int vqid)
 {
 	struct device *dev = rproc->dev.parent;
-	struct platform_device *pdev = to_platform_device(dev);
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(pdev);
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
 
 	dev_dbg(dev, "KICK Firmware to start send messages vqid %d\n", vqid);
 
@@ -557,49 +369,116 @@ static void zynqmp_r5_rproc_kick(struct rproc *rproc, int vqid)
 static int zynqmp_r5_rproc_stop(struct rproc *rproc)
 {
 	struct device *dev = rproc->dev.parent;
-	struct platform_device *pdev = to_platform_device(dev);
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(pdev);
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
 
 	dev_dbg(dev, "%s\n", __func__);
 
-	local->rpu_ops->halt(local, true);
-	local->rpu_ops->en_reset(local, true);
-
-	local->ipi_ops->reset(local);
+	r5_halt(local, true);
 
 	return 0;
+}
+
+static void *zynqmp_r5_rproc_da_to_va(struct rproc *rproc, u64 da, int len)
+{
+	struct rproc_mem_entry *mem;
+	void *va = 0;
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
+
+	list_for_each_entry(mem, &local->mems, node) {
+		int offset = da - mem->da;
+
+		/* try next carveout if da is too small */
+		if (offset < 0)
+			continue;
+
+		/* try next carveout if da is too large */
+		if (offset + len > mem->len)
+			continue;
+
+		va = mem->va + offset;
+
+		break;
+	}
+	return va;
 }
 
 static struct rproc_ops zynqmp_r5_rproc_ops = {
 	.start		= zynqmp_r5_rproc_start,
 	.stop		= zynqmp_r5_rproc_stop,
 	.kick		= zynqmp_r5_rproc_kick,
+	.da_to_va       = zynqmp_r5_rproc_da_to_va,
 };
+
+static int zynqmp_r5_rproc_add_mems(struct zynqmp_r5_rproc_pdata *pdata)
+{
+	struct mem_pool_st *mem_node;
+	size_t mem_size;
+	struct gen_pool *mem_pool;
+	struct rproc_mem_entry *mem;
+	dma_addr_t dma;
+	void *va;
+	struct device *dev = pdata->rproc->dev.parent;
+
+	list_for_each_entry(mem_node, &pdata->mem_pools, node) {
+		mem_pool = mem_node->pool;
+		mem_size = gen_pool_size(mem_pool);
+		mem  = devm_kzalloc(dev, sizeof(struct rproc_mem_entry),
+				GFP_KERNEL);
+		if (!mem)
+			return -ENOMEM;
+
+		va = gen_pool_dma_alloc(mem_pool, mem_size, &dma);
+		if (!va) {
+			dev_err(dev, "Failed to allocate dma carveout mem.\n");
+			return -ENOMEM;
+		}
+		mem->priv = (void *)mem_pool;
+		mem->va = va;
+		mem->len = mem_size;
+		mem->dma = dma;
+		if ((dma & 0xFFF00000) == 0xFFE00000)
+			mem->da = (dma & 0x000FFFFF);
+		else
+			mem->da = dma;
+		dev_dbg(dev, "%s: va = %p, da = 0x%x dma = 0x%llx\n",
+			__func__, va, mem->da, mem->dma);
+		list_add_tail(&mem->node, &pdata->mems);
+	}
+	return 0;
+}
+
 
 /* Release R5 from reset and make it halted.
  * In case the firmware uses TCM, in order to load firmware to TCM,
  * will need to release R5 from reset and stay in halted state.
  */
-static void zynqmp_r5_rproc_init(struct rproc *rproc)
+static int zynqmp_r5_rproc_init(struct rproc *rproc)
 {
 	struct device *dev = rproc->dev.parent;
-	struct platform_device *pdev = to_platform_device(dev);
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(pdev);
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
+	int ret;
 
 	dev_dbg(dev, "%s\n", __func__);
 
-	local->rpu_ops->core_conf(local);
-	local->rpu_ops->halt(local, true);
-	local->rpu_ops->en_reset(local, false);
-	local->rpu_ops->en_clock(local);
+	ret = r5_request_tcm(local);
+	if (ret)
+		return ret;
+
+	return zynqmp_r5_rproc_add_mems(local);
 }
 
 static irqreturn_t r5_remoteproc_interrupt(int irq, void *dev_id)
 {
 	struct device *dev = dev_id;
 	struct platform_device *pdev = to_platform_device(dev);
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(pdev);
-	irqreturn_t ret;
+	struct rproc *rproc = platform_get_drvdata(pdev);
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
+	u32 ipi_reg;
+
+	/* Check if there is a kick from R5 */
+	ipi_reg = reg_read(local->ipi_base, ISR_OFFSET);
+	if (!(ipi_reg & local->ipi_dest_mask))
+		return IRQ_NONE;
 
 	dev_dbg(dev, "KICK Linux because of pending message(irq%d)\n", irq);
 
@@ -612,27 +491,61 @@ static irqreturn_t r5_remoteproc_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Empty RSC table
+ */
+static struct resource_table r5_rproc_default_rsc_table = {
+	.ver = 1,
+	.num = 0,
+};
+
+/* Redefine r5 resource table to allow empty resource table */
+static struct resource_table *r5_rproc_find_rsc_table(
+			struct rproc *rproc,
+			const struct firmware *fw,
+			int *tablesz)
+{
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
+	struct resource_table *rsc;
+
+	rsc = local->default_fw_ops->find_rsc_table(rproc, fw, tablesz);
+	if (!rsc) {
+		*tablesz = sizeof(r5_rproc_default_rsc_table);
+		return &r5_rproc_default_rsc_table;
+	} else {
+		return rsc;
+	}
+}
+
 static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 {
 	const unsigned char *prop;
 	struct resource *res;
 	int ret = 0;
-	int method = 0;
-	char *rproc_firmware = 0;
 	struct zynqmp_r5_rproc_pdata *local;
+	struct rproc *rproc;
+	struct gen_pool *mem_pool = NULL;
+	struct mem_pool_st *mem_node = NULL;
+	char mem_name[16];
+	int i;
 
-	local = devm_kzalloc(&pdev->dev, sizeof(struct zynqmp_r5_rproc_pdata),
-				 GFP_KERNEL);
-	if (!local)
+	rproc = rproc_alloc(&pdev->dev, dev_name(&pdev->dev),
+		&zynqmp_r5_rproc_ops, firmware,
+		sizeof(struct zynqmp_r5_rproc_pdata));
+	if (!rproc) {
+		dev_err(&pdev->dev, "rproc allocation failed\n");
 		return -ENOMEM;
+	}
+	local = rproc->priv;
+	local->rproc = rproc;
 
-	platform_set_drvdata(pdev, local);
+	platform_set_drvdata(pdev, rproc);
 
 	/* FIXME: it may need to extend to 64/48 bit */
 	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret) {
 		dev_err(&pdev->dev, "dma_set_coherent_mask: %d\n", ret);
-		goto dma_mask_fault;
+		goto rproc_fault;
 	}
 
 	prop = of_get_property(pdev->dev.of_node, "core_conf", NULL);
@@ -645,72 +558,63 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 	if (!strcmp(prop, "split0")) {
 		local->rpu_mode = SPLIT;
 		local->rpu_id = 0;
+		local->ipi_dest_mask = RPU_0_IPI_MASK;
 	} else if (!strcmp(prop, "split1")) {
 		local->rpu_mode = SPLIT;
 		local->rpu_id = 1;
+		local->ipi_dest_mask = RPU_1_IPI_MASK;
 	} else if (!strcmp(prop, "lock-step")) {
 		local->rpu_mode = LOCK_STEP;
 		local->rpu_id = 0;
+		local->ipi_dest_mask = RPU_0_IPI_MASK;
 	} else {
 		dev_err(&pdev->dev, "Invalid core_conf mode provided - %s , %d\n",
 			prop, local->rpu_mode);
 		ret = -EINVAL;
-		goto dma_mask_fault;
+		goto rproc_fault;
 	}
 
-	prop = of_get_property(pdev->dev.of_node, "method", NULL);
-	if (!prop) {
-		dev_warn(&pdev->dev, "default method used: smc\n");
-		prop = "direct";
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+		"rpu_base");
+	local->rpu_base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	if (IS_ERR(local->rpu_base)) {
+		dev_err(&pdev->dev, "Unable to map RPU I/O memory\n");
+		ret = PTR_ERR(local->rpu_base);
+		goto rproc_fault;
 	}
 
-	dev_info(&pdev->dev, "IPI/RPU control method: %s\n", prop);
-	if (!strcmp(prop, "direct")) {
-		method = HW;
-		local->ipi_ops = &ipi_hw_ops;
-		local->rpu_ops = &rpu_hw_ops;
-	} else if (!strcmp(prop, "hvc")) {
-		method = HVC;
-		local->ipi_ops = &ipi_hvc_ops;
-		local->rpu_ops = &rpu_hvc_ops;
-	} else if (!strcmp(prop, "smc")) {
-		method = SMC;
-		local->ipi_ops = &ipi_smc_ops;
-		local->rpu_ops = &rpu_smc_ops;
-	} else {
-		dev_err(&pdev->dev, "Invalid method provided - %s\n",
-			prop);
-		ret = -EINVAL;
-		goto dma_mask_fault;
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+		"apb_base");
+	local->crl_apb_base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	if (IS_ERR(local->crl_apb_base)) {
+		dev_err(&pdev->dev, "Unable to map CRL_APB I/O memory\n");
+		ret = PTR_ERR(local->crl_apb_base);
+		goto rproc_fault;
 	}
 
-	/* Handle direct hardware access */
-	/* (TODO: remove once RPU and IPI drivers are ready ) */
-	if (method == HW) {
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-			"rpu_base");
-		local->rpu_base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-		if (IS_ERR(local->rpu_base)) {
-			dev_err(&pdev->dev, "Unable to map RPU I/O memory\n");
-			ret = PTR_ERR(local->rpu_base);
-			goto dma_mask_fault;
-		}
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ipi");
+	local->ipi_base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	if (IS_ERR(local->ipi_base)) {
+		pr_err("%s: Unable to map IPI\n", __func__);
+		ret = PTR_ERR(local->ipi_base);
+		goto rproc_fault;
+	}
 
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-			"apb_base");
-		local->crl_apb_base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-		if (IS_ERR(local->crl_apb_base)) {
-			dev_err(&pdev->dev, "Unable to map CRL_APB I/O memory\n");
-			ret = PTR_ERR(local->crl_apb_base);
-			goto dma_mask_fault;
-		}
-
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "ipi");
-		local->ipi_base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-		if (IS_ERR(local->ipi_base)) {
-			pr_err("%s: Unable to map IPI\n", __func__);
-			ret = PTR_ERR(local->ipi_base);
-			goto dma_mask_fault;
+	/* Find on-chip memory */
+	INIT_LIST_HEAD(&local->mem_pools);
+	INIT_LIST_HEAD(&local->mems);
+	for (i = 0; i < MAX_ON_CHIP_MEMS; i++) {
+		sprintf(mem_name, "sram_%d", i);
+		mem_pool = of_gen_pool_get(pdev->dev.of_node,
+					mem_name, 0);
+		if (mem_pool) {
+			mem_node = devm_kzalloc(&pdev->dev,
+					sizeof(struct mem_pool_st),
+					GFP_KERNEL);
+			if (!mem_node)
+				goto rproc_fault;
+			mem_node->pool = mem_pool;
+			list_add_tail(&mem_node->node, &local->mem_pools);
 		}
 	}
 
@@ -719,7 +623,7 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 	if (local->vring0 < 0) {
 		ret = local->vring0;
 		dev_err(&pdev->dev, "unable to find IPI IRQ\n");
-		goto dma_mask_fault;
+		goto rproc_fault;
 	}
 	ret = devm_request_irq(&pdev->dev, local->vring0,
 		r5_remoteproc_interrupt, IRQF_SHARED, dev_name(&pdev->dev),
@@ -727,27 +631,29 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_err(&pdev->dev, "IRQ %d already allocated\n",
 			local->vring0);
-		goto dma_mask_fault;
+		goto rproc_fault;
 	}
 	dev_dbg(&pdev->dev, "vring0 irq: %d\n", local->vring0);
 
-	if (local->rpu_id == 0) {
-		local->ipi_dest_mask = RPU_0_IPI_MASK;
-		rproc_firmware = firmware;
-	} else {
-		local->ipi_dest_mask = RPU_1_IPI_MASK;
-		rproc_firmware = firmware1;
-	}
+	/* change firmware if the remote is RPU1*/
+	if (local->rpu_id)
+		rproc->firmware = firmware1;
+	dev_dbg(&pdev->dev, "Using firmware: %s\n", rproc->firmware);
 
-	dev_dbg(&pdev->dev, "Using firmware: %s\n", rproc_firmware);
-	local->rproc = rproc_alloc(&pdev->dev, dev_name(&pdev->dev),
-		&zynqmp_r5_rproc_ops, rproc_firmware, sizeof(struct rproc));
-	if (!local->rproc) {
-		dev_err(&pdev->dev, "rproc allocation failed\n");
+	ret = zynqmp_r5_rproc_init(local->rproc);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to init ZynqMP R5 rproc\n");
 		goto rproc_fault;
 	}
 
-	zynqmp_r5_rproc_init(local->rproc);
+	rproc->auto_boot = autoboot;
+
+	/* Set local firmware operations */
+	memcpy(&local->fw_ops, rproc->fw_ops, sizeof(local->fw_ops));
+	local->fw_ops.find_rsc_table = r5_rproc_find_rsc_table;
+	local->default_fw_ops = rproc->fw_ops;
+	rproc->fw_ops = &local->fw_ops;
+
 	ret = rproc_add(local->rproc);
 	if (ret) {
 		dev_err(&pdev->dev, "rproc registration failed\n");
@@ -757,24 +663,30 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 	return ret;
 
 rproc_fault:
-	rproc_put(local->rproc);
-
-dma_mask_fault:
-	dma_release_declared_memory(&pdev->dev);
+	rproc_free(local->rproc);
 
 	return ret;
 }
 
 static int zynqmp_r5_remoteproc_remove(struct platform_device *pdev)
 {
-	struct zynqmp_r5_rproc_pdata *local = platform_get_drvdata(pdev);
+	struct rproc *rproc = platform_get_drvdata(pdev);
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
+	struct rproc_mem_entry *mem;
 
 	dev_info(&pdev->dev, "%s\n", __func__);
 
-	rproc_del(local->rproc);
-	rproc_put(local->rproc);
+	rproc_del(rproc);
 
-	dma_release_declared_memory(&pdev->dev);
+	list_for_each_entry(mem, &local->mems, node) {
+		if (mem->priv)
+			gen_pool_free((struct gen_pool *)mem->priv,
+				      (unsigned long)mem->va, mem->len);
+	}
+
+	r5_release_tcm(local);
+
+	rproc_free(rproc);
 
 	return 0;
 }
@@ -798,8 +710,11 @@ module_platform_driver(zynqmp_r5_remoteproc_driver);
 
 module_param(firmware, charp, 0);
 module_param(firmware1, charp, 0);
+module_param_named(autoboot,  autoboot, bool, 0444);
 MODULE_PARM_DESC(firmware, "Override the RPU-0 firmware image name.");
 MODULE_PARM_DESC(firmware1, "Override the RPU-1 firmware image name.");
+MODULE_PARM_DESC(autoboot,
+	"enable | disable autoboot. (default: true)");
 
 MODULE_AUTHOR("Jason Wu <j.wu@xilinx.com>");
 MODULE_LICENSE("GPL v2");

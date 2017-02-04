@@ -115,11 +115,11 @@ enum fw_resource_type {
 	RSC_DEVMEM	= 1,
 	RSC_TRACE	= 2,
 	RSC_VDEV	= 3,
-	RSC_MMU		= 4,
+	RSC_RPROC_MEM	= 4,
 	RSC_LAST	= 5,
 };
 
-#define FW_RSC_ADDR_ANY (0xFFFFFFFFFFFFFFFF)
+#define FW_RSC_ADDR_ANY (-1)
 
 /**
  * struct fw_rsc_carveout - physically contiguous memory request
@@ -242,7 +242,7 @@ struct fw_rsc_trace {
  * @notifyid is a unique rproc-wide notify index for this vring. This notify
  * index is used when kicking a remote processor, to let it know that this
  * vring is triggered.
- * @reserved: reserved (must be zero)
+ * @pa: physical address
  *
  * This descriptor is not a resource entry by itself; it is part of the
  * vdev resource type (see below).
@@ -256,7 +256,7 @@ struct fw_rsc_vdev_vring {
 	u32 align;
 	u32 num;
 	u32 notifyid;
-	u32 reserved;
+	u32 pa;
 } __packed;
 
 /**
@@ -304,6 +304,26 @@ struct fw_rsc_vdev {
 	u8 num_of_vrings;
 	u8 reserved[2];
 	struct fw_rsc_vdev_vring vring[0];
+} __packed;
+
+/**
+ * struct fw_rsc_rproc_mem - remote processor memory
+ * @da: device address
+ * @pa: physical address
+ * @len: length (in bytes)
+ * @reserved: reserved (must be zero)
+ *
+ * This resource entry tells the host to the remote processor
+ * memory that the host can be used as shared memory.
+ *
+ * These request entries should precede other shared resource entries
+ * such as vdevs, vrings.
+ */
+struct fw_rsc_rproc_mem {
+	u32 da;
+	u32 pa;
+	u32 len;
+	u32 reserved;
 } __packed;
 
 /**
@@ -366,6 +386,8 @@ enum rproc_state {
 /**
  * enum rproc_crash_type - remote processor crash types
  * @RPROC_MMUFAULT:	iommu fault
+ * @RPROC_WATCHDOG:	watchdog bite
+ * @RPROC_FATAL_ERROR	fatal error
  *
  * Each element of the enum is used as an array index. So that, the value of
  * the elements should be always something sane.
@@ -374,6 +396,8 @@ enum rproc_state {
  */
 enum rproc_crash_type {
 	RPROC_MMUFAULT,
+	RPROC_WATCHDOG,
+	RPROC_FATAL_ERROR,
 };
 
 /**
@@ -406,7 +430,6 @@ enum rproc_crash_type {
  * @max_notifyid: largest allocated notify id.
  * @table_ptr: pointer to the resource table in effect
  * @cached_table: copy of the resource table
- * @table_csum: checksum of the resource table
  * @has_iommu: flag to indicate if remote processor is behind an MMU
  */
 struct rproc {
@@ -432,14 +455,14 @@ struct rproc {
 	struct idr notifyids;
 	int index;
 	struct work_struct crash_handler;
-	unsigned crash_cnt;
+	unsigned int crash_cnt;
 	struct completion crash_comp;
 	bool recovery_disabled;
 	int max_notifyid;
 	struct resource_table *table_ptr;
 	struct resource_table *cached_table;
-	u32 table_csum;
 	bool has_iommu;
+	bool auto_boot;
 };
 
 /* we currently support only two vrings per rvdev */
@@ -486,11 +509,12 @@ struct rproc_vdev {
 
 struct rproc *rproc_get_by_phandle(phandle phandle);
 struct rproc *rproc_alloc(struct device *dev, const char *name,
-				const struct rproc_ops *ops,
-				const char *firmware, int len);
+			  const struct rproc_ops *ops,
+			  const char *firmware, int len);
 void rproc_put(struct rproc *rproc);
 int rproc_add(struct rproc *rproc);
 int rproc_del(struct rproc *rproc);
+void rproc_free(struct rproc *rproc);
 
 int rproc_boot(struct rproc *rproc);
 void rproc_shutdown(struct rproc *rproc);

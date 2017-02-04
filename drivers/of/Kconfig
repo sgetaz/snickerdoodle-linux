@@ -82,6 +82,7 @@ config OF_NET
 config OF_MDIO
 	def_tristate PHYLIB
 	depends on PHYLIB
+	select FIXED_PHY
 	help
 	  OpenFirmware MDIO bus (Ethernet PHY) accessors
 
@@ -96,10 +97,6 @@ config OF_PCI_IRQ
 	depends on OF_PCI && OF_IRQ
 	help
 	  OpenFirmware PCI IRQ routing helpers
-
-config OF_MTD
-	depends on MTD
-	def_bool y
 
 config OF_RESERVED_MEM
 	depends on OF_EARLY_FLATTREE
@@ -126,5 +123,8 @@ config OF_CONFIGFS
 	depends on OF_OVERLAY
 	help
 	  Enable a simple user-space driver DT overlay interface.
+
+config OF_NUMA
+	bool
 
 endif # OF

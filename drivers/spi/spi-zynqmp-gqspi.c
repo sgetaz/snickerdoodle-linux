@@ -425,7 +425,7 @@ static int zynqmp_prepare_transfer_hardware(struct spi_master *master)
 
 	ret = clk_enable(xqspi->refclk);
 	if (ret)
-		goto clk_err;
+		return ret;
 
 	ret = clk_enable(xqspi->pclk);
 	if (ret)
@@ -434,6 +434,7 @@ static int zynqmp_prepare_transfer_hardware(struct spi_master *master)
 	zynqmp_gqspi_write(xqspi, GQSPI_EN_OFST, GQSPI_EN_MASK);
 	return 0;
 clk_err:
+	clk_disable(xqspi->refclk);
 	return ret;
 }
 
@@ -469,7 +470,7 @@ static void zynqmp_qspi_chipselect(struct spi_device *qspi, bool is_high)
 
 	genfifoentry |= GQSPI_GENFIFO_MODE_SPI;
 
-	if (qspi->master->flags & SPI_BOTH_FLASH) {
+	if (qspi->master->flags & SPI_MASTER_BOTH_CS) {
 		zynqmp_gqspi_selectslave(xqspi,
 			GQSPI_SELECT_FLASH_CS_BOTH,
 			GQSPI_SELECT_FLASH_BUS_BOTH);
@@ -945,7 +946,7 @@ static int zynqmp_qspi_start_transfer(struct spi_master *master,
 	genfifoentry |= xqspi->genfifobus;
 
 	if ((!xqspi->isinstr) &&
-		(master->flags & SPI_DATA_STRIPE))
+		(master->flags & SPI_MASTER_DATA_STRIPE))
 		genfifoentry |= GQSPI_GENFIFO_STRIPE;
 
 	zynqmp_qspi_txrxsetup(xqspi, transfer, &genfifoentry);

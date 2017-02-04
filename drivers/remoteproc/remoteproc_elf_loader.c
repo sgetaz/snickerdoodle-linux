@@ -166,18 +166,18 @@ rproc_elf_load_segments(struct rproc *rproc, const struct firmware *fw)
 			continue;
 
 		dev_dbg(dev, "phdr: type %d da 0x%x memsz 0x%x filesz 0x%x\n",
-					phdr->p_type, da, memsz, filesz);
+			phdr->p_type, da, memsz, filesz);
 
 		if (filesz > memsz) {
 			dev_err(dev, "bad phdr filesz 0x%x memsz 0x%x\n",
-							filesz, memsz);
+				filesz, memsz);
 			ret = -EINVAL;
 			break;
 		}
 
 		if (offset + filesz > fw->size) {
 			dev_err(dev, "truncated fw: need 0x%x avail 0x%zx\n",
-					offset + filesz, fw->size);
+				offset + filesz, fw->size);
 			ret = -EINVAL;
 			break;
 		}
@@ -192,7 +192,7 @@ rproc_elf_load_segments(struct rproc *rproc, const struct firmware *fw)
 
 		/* put the segment where the remote processor expects it */
 		if (phdr->p_filesz)
-			memcpy_toio(ptr, elf_data + phdr->p_offset, filesz);
+			memcpy(ptr, elf_data + phdr->p_offset, filesz);
 
 		/*
 		 * Zero out remaining memory for this segment.
@@ -202,7 +202,7 @@ rproc_elf_load_segments(struct rproc *rproc, const struct firmware *fw)
 		 * this.
 		 */
 		if (memsz > filesz)
-			memset_io(ptr + filesz, 0, memsz - filesz);
+			memset(ptr + filesz, 0, memsz - filesz);
 	}
 
 	return ret;
