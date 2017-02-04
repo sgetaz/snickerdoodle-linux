@@ -45,7 +45,7 @@ static int create_overlay(struct cfs_overlay_item *overlay, void *blob)
 	int err;
 
 	/* unflatten the tree */
-	of_fdt_unflatten_tree(blob, &overlay->overlay);
+	of_fdt_unflatten_tree(blob, NULL, &overlay->overlay);
 	if (overlay->overlay == NULL) {
 		pr_err("%s: failed to unflatten tree\n", __func__);
 		err = -EINVAL;
@@ -284,7 +284,7 @@ static struct configfs_subsystem of_cfs_subsys = {
 			.ci_namebuf = "device-tree",
 			.ci_type = &of_cfs_type,
 		},
-		.default_groups = of_cfs_def_groups,
+		.default_groups = { of_cfs_def_groups },
 	},
 	.su_mutex = __MUTEX_INITIALIZER(of_cfs_subsys.su_mutex),
 };
