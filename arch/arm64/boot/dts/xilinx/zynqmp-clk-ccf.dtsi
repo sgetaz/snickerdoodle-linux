@@ -13,36 +13,42 @@
 
 / {
 	pss_ref_clk: pss_ref_clk {
+		u-boot,dm-pre-reloc;
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <33333333>;
 	};
 
 	video_clk: video_clk {
+		u-boot,dm-pre-reloc;
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <27000000>;
 	};
 
 	pss_alt_ref_clk: pss_alt_ref_clk {
+		u-boot,dm-pre-reloc;
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <0>;
 	};
 
 	gt_crx_ref_clk: gt_crx_ref_clk {
+		u-boot,dm-pre-reloc;
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <108000000>;
 	};
 
 	aux_ref_clk: aux_ref_clk {
+		u-boot,dm-pre-reloc;
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <27000000>;
 	};
 
-	clkc: clkc@ff5e0020 {
+	clkc: clkc {
+		u-boot,dm-pre-reloc;
 		#clock-cells = <1>;
 		compatible = "xlnx,zynqmp-clkc";
 		clocks = <&pss_ref_clk>, <&video_clk>, <&pss_alt_ref_clk>, <&aux_ref_clk>, <&gt_crx_ref_clk>;
@@ -69,6 +75,13 @@
 				"dll_ref", "adma_ref", "timestamp_ref",
 				"ams_ref", "pl0", "pl1", "pl2", "pl3", "wdt";
 	};
+
+	dp_aclk: clock0 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <100000000>;
+		clock-accuracy = <100>;
+	};
 };
 
 &can0 {
@@ -77,6 +90,10 @@
 
 &can1 {
 	clocks = <&clkc 64>, <&clkc 31>;
+};
+
+&cpu0 {
+	clocks = <&clkc 10>;
 };
 
 &fpd_dma_chan1 {
@@ -109,6 +126,10 @@
 
 &fpd_dma_chan8 {
 	clocks = <&clkc 19>, <&clkc 31>;
+};
+
+&gpu {
+	clocks = <&clkc 24>, <&clkc 25>, <&clkc 26>;
 };
 
 &lpd_dma_chan1 {
@@ -179,6 +200,10 @@
 	clocks = <&clkc 62>;
 };
 
+&pcie {
+	clocks = <&clkc 23>;
+};
+
 &qspi {
 	clocks = <&clkc 53>, <&clkc 31>;
 };
@@ -212,13 +237,33 @@
 };
 
 &usb0 {
-	clocks = <&clkc 32>,  <&clkc 31>;
+	clocks = <&clkc 32>,  <&clkc 34>;
 };
 
 &usb1 {
-	clocks = <&clkc 33>,  <&clkc 36>;
+	clocks = <&clkc 33>,  <&clkc 34>;
 };
 
 &watchdog0 {
 	clocks = <&clkc 75>;
+};
+
+&xilinx_ams {
+	clocks = <&clkc 70>;
+};
+
+&xilinx_drm {
+	clocks = <&clkc 16>;
+};
+
+&xlnx_dp {
+	clocks = <&dp_aclk>, <&clkc 17>;
+};
+
+&xlnx_dpdma {
+	clocks = <&clkc 20>;
+};
+
+&xlnx_dp_snd_codec0 {
+	clocks = <&clkc 17>;
 };

@@ -77,6 +77,7 @@ int dwc3_host_init(struct dwc3 *dwc)
 	xhci->dev.parent	= dwc->dev;
 	xhci->dev.dma_mask	= dwc->dev->dma_mask;
 	xhci->dev.dma_parms	= dwc->dev->dma_parms;
+	xhci->dev.archdata	= dwc->dev->archdata;
 
 	dwc->xhci = xhci;
 
@@ -102,6 +103,17 @@ int dwc3_host_init(struct dwc3 *dwc)
 			  dev_name(&xhci->dev));
 	phy_create_lookup(dwc->usb3_generic_phy, "usb3-phy",
 			  dev_name(&xhci->dev));
+
+	if (dwc->dr_mode == USB_DR_MODE_OTG) {
+		struct usb_phy *phy;
+		phy = usb_get_phy(USB_PHY_TYPE_USB3);
+		if (!IS_ERR(phy)) {
+			if (phy && phy->otg)
+				otg_set_host(phy->otg,
+						(struct usb_bus *)(long)1);
+			usb_put_phy(phy);
+		}
+	}
 
 	ret = platform_device_add(xhci);
 	if (ret) {

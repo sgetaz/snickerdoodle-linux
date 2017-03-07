@@ -140,6 +140,52 @@ static void rproc_disable_iommu(struct rproc *rproc)
 }
 
 /**
+ * rproc_idr_alloc() - allocate id with idr_alloc()
+ * @rproc: handle of a remote processor
+ * @ptr: pointer to the resource to allocate id for
+ * @rsc_type: type of the resource for which to allocate id
+ * @start: start id
+ * @end: end id
+ *
+ * This function returns an ID from idr_alloc() or negative number
+ * if it fails.
+ */
+int rproc_idr_alloc(struct rproc *rproc, void *ptr, unsigned int rsc_type,
+		    int start, int end)
+{
+	struct rproc_id_rsc *rsc;
+	int ret;
+
+	rsc = kzalloc(sizeof(*rsc), GFP_KERNEL);
+	if (!rsc)
+		return -ENOMEM;
+
+	rsc->rsc_ptr = ptr;
+	rsc->rsc_type = rsc_type;
+
+	ret = idr_alloc(&rproc->notifyids, rsc, start, end, GFP_KERNEL);
+	if (ret < 0)
+		kfree(rsc);
+	return ret;
+}
+
+/**
+ * rproc_idr_remove() - remove id with idr_remove()
+ * @rproc: handle of a remote processor
+ * @id: id to remove
+ */
+void rproc_idr_remove(struct rproc *rproc, int id)
+{
+	struct rproc_id_rsc *rsc;
+
+	rsc = idr_find(&rproc->notifyids, id);
+	if (!rsc)
+		return;
+	idr_remove(&rproc->notifyids, id);
+	kfree(rsc);
+}
+
+/**
  * rproc_da_to_va() - lookup the kernel virtual address for a remoteproc address
  * @rproc: handle of a remote processor
  * @da: remoteproc device address to translate
@@ -225,12 +271,10 @@ int rproc_alloc_vring(struct rproc_vdev *rvdev, int i)
 
 	/*
 	 * Assign an rproc-wide unique index for this vring
-	 * TODO: assign a notifyid for rvdev updates as well
-	 * TODO: support predefined notifyids (via resource table)
 	 */
-	ret = idr_alloc(&rproc->notifyids, rvring, 0, 0, GFP_KERNEL);
+	ret = rproc_idr_alloc(rproc, rvring, RPROC_IDR_VRING, 0, 0);
 	if (ret < 0) {
-		dev_err(dev, "idr_alloc failed: %d\n", ret);
+		dev_err(dev, "rvfing idr_alloc failed: %d\n", ret);
 		dma_free_coherent(dev->parent, size, va, dma);
 		return ret;
 	}
@@ -287,8 +331,9 @@ void rproc_free_vring(struct rproc_vring *rvring)
 	int idx = rvring->rvdev->vring - rvring;
 	struct fw_rsc_vdev *rsc;
 
-	dma_free_coherent(rproc->dev.parent, size, rvring->va, rvring->dma);
-	idr_remove(&rproc->notifyids, rvring->notifyid);
+	dma_free_coherent(rproc->dev.parent, size, rvring->va,
+				  rvring->dma);
+	rproc_idr_remove(rproc, rvring->notifyid);
 
 	/* reset resource entry info */
 	rsc = (void *)rproc->table_ptr + rvring->rvdev->rsc_offset;
@@ -826,6 +871,104 @@ static void rproc_resource_cleanup(struct rproc *rproc)
 }
 
 /*
+ * check if the remote is running
+ */
+static bool rproc_is_running(struct rproc *rproc)
+{
+	if (rproc->ops->is_running)
+		return rproc->ops->is_running(rproc);
+	return (rproc->state == RPROC_RUNNING) ? true : false;
+}
+
+/**
+ * rproc_handle_fw_chksum() - handle firmware checksum resource
+ * @rproc: rproc handle
+ * @fw: firmware
+ * @offset: returns fw_chksum resource offset.
+ *
+ * This function will handle request to set the firmware checksum.
+ */
+static
+struct fw_rsc_fw_chksum *rproc_handle_fw_chksum(struct rproc *rproc,
+				const struct firmware *fw, int *offset)
+{
+	struct fw_rsc_fw_chksum *rsc = NULL;
+	int i, tablesz;
+	struct device *dev = &rproc->dev;
+	struct resource_table *table;
+
+	/* look for the resource table */
+	table = rproc_find_rsc_table(rproc, fw, &tablesz);
+	if (!table) {
+		dev_err(dev, "Failed to find resource table\n");
+		return NULL;
+	}
+
+	for (i = 0; i < rproc->table_ptr->num; i++) {
+		int ret = 0;
+		int tmpoffset = rproc->table_ptr->offset[i];
+		struct fw_rsc_hdr *hdr = (void *)rproc->table_ptr + tmpoffset;
+		int avail = tablesz - tmpoffset - sizeof(*hdr);
+
+		if (hdr->type != RSC_FW_CHKSUM)
+			continue;
+
+		rsc = (struct fw_rsc_fw_chksum *)((void *)hdr + sizeof(*hdr));
+		if (sizeof(*rsc) > avail) {
+			dev_err(dev, "firmware checksum rsc is truncated\n");
+			return NULL;
+		}
+		if (rproc->fw_ops->get_chksum) {
+			ret = rproc->fw_ops->get_chksum(rproc, fw,
+				rsc->algo, rsc->chksum, sizeof(rsc->chksum));
+			if (ret) {
+				dev_err(dev,
+					"failed to get firmware chksum.\n");
+				return NULL;
+			}
+		}
+		*offset = tmpoffset + sizeof(*hdr);
+		return rsc;
+	}
+
+	return NULL;
+}
+
+/*
+ * check if the remote needs start.
+ */
+static bool rproc_is_running_fw(struct rproc *rproc, const struct firmware *fw)
+{
+	struct resource_table *loaded_table;
+	struct fw_rsc_fw_chksum *rsc, *loaded_rsc;
+	int rsc_fw_chksum_offset;
+
+	rsc = rproc_handle_fw_chksum(rproc, fw, &rsc_fw_chksum_offset);
+	if (!rsc)
+		return false;
+
+	if (!rproc_is_running(rproc))
+		return false;
+
+	/* look for the loaded resource table */
+	loaded_table = rproc_find_loaded_rsc_table(rproc, fw);
+	if (!loaded_table)
+		return false;
+
+	loaded_rsc = (void *)loaded_table + rsc_fw_chksum_offset;
+	if (!loaded_rsc->algo || !loaded_rsc->chksum)
+		return false;
+
+	if (strncmp(rsc->algo, loaded_rsc->algo, strlen(rsc->algo)))
+		return false;
+
+	if (memcmp(rsc->chksum, loaded_rsc->chksum, sizeof(rsc->chksum)))
+		return false;
+
+	return true;
+}
+
+/*
  * take a firmware and boot a remote processor with it.
  */
 static int rproc_fw_boot(struct rproc *rproc, const struct firmware *fw)
@@ -834,6 +977,7 @@ static int rproc_fw_boot(struct rproc *rproc, const struct firmware *fw)
 	const char *name = rproc->firmware;
 	struct resource_table *table, *loaded_table;
 	int ret, tablesz;
+	bool is_running = false;
 
 	ret = rproc_fw_sanity_check(rproc, fw);
 	if (ret)
@@ -876,6 +1020,19 @@ static int rproc_fw_boot(struct rproc *rproc, const struct firmware *fw)
 	/* reset max_notifyid */
 	rproc->max_notifyid = -1;
 
+	/* check if the rproc is already running the firmware */
+	/* As it may be required to know if the remote is already running
+	 * when handling the resource table, check if the remote is already
+	 * running the expected firmware before handling the resource table.
+	 */
+	is_running = rproc_is_running_fw(rproc, fw);
+	if (is_running) {
+		rproc->state = RPROC_RUNNING_INDEPENDENT;
+		loaded_table = rproc_find_loaded_rsc_table(rproc, fw);
+		if (loaded_table)
+			rproc->table_ptr = loaded_table;
+	}
+
 	/* look for remote processor memory and declare them. */
 	ret = rproc_handle_resources(rproc, tablesz, rproc_rproc_mem_handler);
 	if (ret) {
@@ -898,37 +1055,54 @@ static int rproc_fw_boot(struct rproc *rproc, const struct firmware *fw)
 		goto clean_up_resources;
 	}
 
-	/* load the ELF segments to memory */
-	ret = rproc_load_segments(rproc, fw);
-	if (ret) {
-		dev_err(dev, "Failed to load program segments: %d\n", ret);
-		goto clean_up_resources;
+	if (!is_running) {
+		/* If rproc is running, stop it first */
+		if (rproc_is_running(rproc)) {
+			dev_info(dev, "Restarting the remote.\n");
+			ret = rproc->ops->stop(rproc);
+			if (ret) {
+				atomic_inc(&rproc->power);
+				dev_err(dev, "can't stop rproc: %d\n", ret);
+				goto clean_up_resources;
+			}
+		}
+
+		/* load the ELF segments to memory */
+		ret = rproc_load_segments(rproc, fw);
+		if (ret) {
+			dev_err(dev, "Failed to load program segments: %d\n",
+				ret);
+			goto clean_up_resources;
+		}
+
+		/*
+		 * The starting device has been given the rproc->cached_table
+		 * as the resource table. The address of the vring along with
+		 * the other allocated resources (carveouts etc) is stored in
+		 * cached_table. In order to pass this information to the
+		 * remote device we must copy this information to device
+		 * memory. We also update the table_ptr so that any subsequent
+		 * changes will be applied to the loaded version.
+		 */
+		loaded_table = rproc_find_loaded_rsc_table(rproc, fw);
+		if (loaded_table) {
+			memcpy(loaded_table, rproc->cached_table, tablesz);
+			rproc->table_ptr = loaded_table;
+		}
+
+		/* power up the remote processor */
+		ret = rproc->ops->start(rproc);
+		if (ret) {
+			dev_err(dev, "can't start rproc %s: %d\n",
+				rproc->name, ret);
+			goto clean_up_resources;
+		}
+
+		rproc->state = RPROC_RUNNING;
+		dev_info(dev, "remote processor %s is now up\n", rproc->name);
+	} else {
+		dev_info(dev, "remote is already running. Do not restart\n");
 	}
-
-	/*
-	 * The starting device has been given the rproc->cached_table as the
-	 * resource table. The address of the vring along with the other
-	 * allocated resources (carveouts etc) is stored in cached_table.
-	 * In order to pass this information to the remote device we must copy
-	 * this information to device memory. We also update the table_ptr so
-	 * that any subsequent changes will be applied to the loaded version.
-	 */
-	loaded_table = rproc_find_loaded_rsc_table(rproc, fw);
-	if (loaded_table) {
-		memcpy(loaded_table, rproc->cached_table, tablesz);
-		rproc->table_ptr = loaded_table;
-	}
-
-	/* power up the remote processor */
-	ret = rproc->ops->start(rproc);
-	if (ret) {
-		dev_err(dev, "can't start rproc %s: %d\n", rproc->name, ret);
-		goto clean_up_resources;
-	}
-
-	rproc->state = RPROC_RUNNING;
-
-	dev_info(dev, "remote processor %s is now up\n", rproc->name);
 
 	return 0;
 
@@ -1158,6 +1332,7 @@ void rproc_shutdown(struct rproc *rproc)
 {
 	struct device *dev = &rproc->dev;
 	int ret;
+	int pre_rproc_state;
 
 	ret = mutex_lock_interruptible(&rproc->lock);
 	if (ret) {
@@ -1177,6 +1352,9 @@ void rproc_shutdown(struct rproc *rproc)
 		goto out;
 	}
 
+	pre_rproc_state = rproc->state;
+	rproc->state = RPROC_OFFLINE;
+
 	/* clean up all acquired resources */
 	rproc_resource_cleanup(rproc);
 
@@ -1188,10 +1366,8 @@ void rproc_shutdown(struct rproc *rproc)
 	rproc->table_ptr = NULL;
 
 	/* if in crash state, unlock crash handler */
-	if (rproc->state == RPROC_CRASHED)
+	if (pre_rproc_state == RPROC_CRASHED)
 		complete_all(&rproc->crash_comp);
-
-	rproc->state = RPROC_OFFLINE;
 
 	dev_info(dev, "stopped remote processor %s\n", rproc->name);
 
@@ -1323,6 +1499,7 @@ static void rproc_type_release(struct device *dev)
 	if (rproc->index >= 0)
 		ida_simple_remove(&rproc_dev_index, rproc->index);
 
+	kfree(rproc->firmware);
 	kfree(rproc);
 }
 
@@ -1360,31 +1537,31 @@ struct rproc *rproc_alloc(struct device *dev, const char *name,
 {
 	struct rproc *rproc;
 	char *p, *template = "rproc-%s-fw";
-	int name_len = 0;
+	int name_len;
 
 	if (!dev || !name || !ops)
 		return NULL;
 
-	if (!firmware)
+	if (!firmware) {
 		/*
-		 * Make room for default firmware name (minus %s plus '\0').
 		 * If the caller didn't pass in a firmware name then
-		 * construct a default name.  We're already glomming 'len'
-		 * bytes onto the end of the struct rproc allocation, so do
-		 * a few more for the default firmware name (but only if
-		 * the caller doesn't pass one).
+		 * construct a default name.
 		 */
 		name_len = strlen(name) + strlen(template) - 2 + 1;
-
-	rproc = kzalloc(sizeof(*rproc) + len + name_len, GFP_KERNEL);
-	if (!rproc)
-		return NULL;
-
-	if (!firmware) {
-		p = (char *)rproc + sizeof(struct rproc) + len;
+		p = kmalloc(name_len, GFP_KERNEL);
+		if (!p)
+			return NULL;
 		snprintf(p, name_len, template, name);
 	} else {
-		p = (char *)firmware;
+		p = kstrdup(firmware, GFP_KERNEL);
+		if (!p)
+			return NULL;
+	}
+
+	rproc = kzalloc(sizeof(struct rproc) + len, GFP_KERNEL);
+	if (!rproc) {
+		kfree(p);
+		return NULL;
 	}
 
 	rproc->firmware = p;

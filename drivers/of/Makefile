@@ -1,6 +1,7 @@
 ccflags-$(CONFIG_OF_DEBUG) := -DDEBUG
 
 obj-y = base.o device.o platform.o
+obj-$(CONFIG_OF_CONFIGFS) += configfs.o
 obj-$(CONFIG_OF_DYNAMIC) += dynamic.o
 obj-$(CONFIG_OF_FLATTREE) += fdt.o
 obj-$(CONFIG_OF_EARLY_FLATTREE) += fdt_address.o

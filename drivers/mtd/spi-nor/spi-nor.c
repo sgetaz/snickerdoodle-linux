@@ -385,7 +385,6 @@ static int write_ear(struct spi_nor *nor, u32 addr)
 		write_enable(nor);
 		code = SPINOR_OP_WREAR;
 	}
-	printk("jedecid %x\n\r",nor->jedec_id);
 	nor->cmd_buf[0] = ear;
 
 	ret = nor->write_reg(nor, code, nor->cmd_buf, 1);
@@ -1361,8 +1360,8 @@ static const struct flash_info *spi_nor_read_id(struct spi_nor *nor)
 				return &spi_nor_ids[tmp];
 		}
 	}
-	dev_err(nor->dev, "unrecognized JEDEC id bytes: %02x, %02x, %02x info: %02x, %02x, %02x\n",
-		id[0], id[1], id[2],info->id[0],info->id[1],info->id[2]);
+	dev_err(nor->dev, "unrecognized JEDEC id bytes: %02x, %02x, %02x\n",
+		id[0], id[1], id[2]);
 	return ERR_PTR(-ENODEV);
 }
 
@@ -1376,10 +1375,18 @@ static int spi_nor_read(struct mtd_info *mtd, loff_t from, size_t len,
 	u32 read_len = 0;
 	u32 rem_bank_len = 0;
 	u8 bank;
+	u8 is_ofst_odd = 0;
 
 #define OFFSET_16_MB 0x1000000
 
 	dev_dbg(nor->dev, "from 0x%08x, len %zd\n", (u32)from, len);
+
+	if ((nor->isparallel) && (offset & 1)) {
+		/* We can hit this case when we use file system like ubifs */
+		from = (loff_t)(from - 1);
+		len = (size_t)(len + 1);
+		is_ofst_odd = 1;
+	}
 
 	ret = spi_nor_lock_and_prep(nor, SPI_NOR_OPS_READ);
 	if (ret)
@@ -1434,7 +1441,12 @@ static int spi_nor_read(struct mtd_info *mtd, loff_t from, size_t len,
 			goto read_err;
 
 		WARN_ON(ret > len);
-		*retlen += ret;
+		if (is_ofst_odd == 1) {
+			memcpy(buf, (buf + 1), (len - 1));
+			*retlen += (ret - 1);
+		} else {
+			*retlen += ret;
+		}
 		buf += ret;
 		from += ret;
 		len -= ret;
@@ -1989,7 +2001,6 @@ int spi_nor_scan(struct spi_nor *nor, const char *name, enum read_mode mode)
 				nor->spi->master->flags |= SPI_MASTER_U_PAGE;
 				set_4byte(nor, info, 1);
 				nor->spi->master->flags &= ~SPI_MASTER_U_PAGE;
-				printk("4 Byte addressing for stacked\n\r");
 			}
 #ifdef CONFIG_OF
 		}
@@ -2006,17 +2017,19 @@ int spi_nor_scan(struct spi_nor *nor, const char *name, enum read_mode mode)
 
 	nor->read_dummy = spi_nor_read_dummy_cycles(nor);
 
-	printk("%s (%lld Kbytes)\n", info->name,
+	dev_info(dev, "%s (%lld Kbytes)\n", info->name,
 			(long long)mtd->size >> 10);
 
-	printk("mtd .name = %s, .size = 0x%llx (%lldMiB), "
+	dev_dbg(dev,
+		"mtd .name = %s, .size = 0x%llx (%lldMiB), "
 		".erasesize = 0x%.8x (%uKiB) .numeraseregions = %d\n",
 		mtd->name, (long long)mtd->size, (long long)(mtd->size >> 20),
 		mtd->erasesize, mtd->erasesize / 1024, mtd->numeraseregions);
 
 	if (mtd->numeraseregions)
 		for (i = 0; i < mtd->numeraseregions; i++)
-			printk("mtd.eraseregions[%d] = { .offset = 0x%llx, "
+			dev_dbg(dev,
+				"mtd.eraseregions[%d] = { .offset = 0x%llx, "
 				".erasesize = 0x%.8x (%uKiB), "
 				".numblocks = %d }\n",
 				i, (long long)mtd->eraseregions[i].offset,

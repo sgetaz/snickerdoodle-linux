@@ -10,6 +10,7 @@
  * (at your option) any later version.
  */
 
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -62,21 +63,9 @@
 #define CFG_ENABLE_PM_MSG_FWD		BIT(1)
 #define CFG_ENABLE_INT_MSG_FWD		BIT(2)
 #define CFG_ENABLE_ERR_MSG_FWD		BIT(3)
-#define CFG_ENABLE_SLT_MSG_FWD		BIT(5)
-#define CFG_ENABLE_VEN_MSG_FWD		BIT(7)
-#define CFG_ENABLE_OTH_MSG_FWD		BIT(13)
-#define CFG_ENABLE_VEN_MSG_EN		BIT(14)
-#define CFG_ENABLE_VEN_MSG_VEN_INV	BIT(15)
-#define CFG_ENABLE_VEN_MSG_VEN_ID	GENMASK(31, 16)
 #define CFG_ENABLE_MSG_FILTER_MASK	(CFG_ENABLE_PM_MSG_FWD | \
 					CFG_ENABLE_INT_MSG_FWD | \
-					CFG_ENABLE_ERR_MSG_FWD | \
-					CFG_ENABLE_SLT_MSG_FWD | \
-					CFG_ENABLE_VEN_MSG_FWD | \
-					CFG_ENABLE_OTH_MSG_FWD | \
-					CFG_ENABLE_VEN_MSG_EN | \
-					CFG_ENABLE_VEN_MSG_VEN_INV | \
-					CFG_ENABLE_VEN_MSG_VEN_ID)
+					CFG_ENABLE_ERR_MSG_FWD)
 
 /* Misc interrupt status mask bits */
 #define MSGF_MISC_SR_RXMSG_AVAIL	BIT(0)
@@ -184,6 +173,7 @@ struct nwl_pcie {
 	u8 root_busno;
 	struct nwl_msi msi;
 	struct irq_domain *legacy_irq_domain;
+	struct clk *clk;
 };
 
 static inline u32 nwl_bridge_readl(struct nwl_pcie *pcie, u32 off)
@@ -819,6 +809,11 @@ static int nwl_pcie_probe(struct platform_device *pdev)
 		dev_err(dev, "Parsing DT failed\n");
 		return err;
 	}
+
+	pcie->clk = devm_clk_get(dev, NULL);
+	if (IS_ERR(pcie->clk))
+		return PTR_ERR(pcie->clk);
+	clk_prepare_enable(pcie->clk);
 
 	err = nwl_pcie_bridge_init(pcie);
 	if (err) {

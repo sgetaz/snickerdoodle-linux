@@ -35,13 +35,16 @@
 #include <linux/delay.h>
 #include <linux/list.h>
 #include <linux/genalloc.h>
+#include <linux/pfn.h>
+#include <linux/idr.h>
 
 #include "remoteproc_internal.h"
 
 /* Register offset definitions for RPU. */
 #define RPU_GLBL_CNTL_OFFSET	0x00000000 /* RPU control */
-#define RPU_0_CFG_OFFSET	0x00000100 /* RPU0 configuration */
-#define RPU_1_CFG_OFFSET	0x00000200 /* RPU1 Configuration */
+
+#define RPU_CFG_OFFSET	0x00000000 /* RPU configuration */
+
 /* Boot memory bit. high for OCM, low for TCM */
 #define VINITHI_BIT		BIT(2)
 /* CPU halt bit, high: processor is running. low: processor is halt */
@@ -88,11 +91,7 @@
 /* Maximum on chip memories used by the driver*/
 #define MAX_ON_CHIP_MEMS        32
 
-/* Module parameter */
-static char *firmware = "r5_0_firmware";
-static char *firmware1 = "r5_1_firmware";
-
-static bool autoboot __read_mostly = true;
+static bool autoboot __read_mostly;
 
 struct zynqmp_r5_rproc_pdata;
 
@@ -135,6 +134,7 @@ struct zynqmp_r5_rproc_pdata {
 	const struct rproc_fw_ops *default_fw_ops;
 	struct work_struct workqueue;
 	void __iomem *rpu_base;
+	void __iomem *rpu_glbl_base;
 	void __iomem *crl_apb_base;
 	void __iomem *ipi_base;
 	enum rpu_core_conf rpu_mode;
@@ -156,12 +156,10 @@ struct zynqmp_r5_rproc_pdata {
 static void hw_r5_boot_dev(struct zynqmp_r5_rproc_pdata *pdata)
 {
 	u32 tmp;
-	u32 offset = RPU_1_CFG_OFFSET;
+	u32 offset = RPU_CFG_OFFSET;
 
 	pr_debug("%s: R5 ID: %d, boot_dev %d\n",
 			 __func__, pdata->rpu_id, pdata->bootmem);
-	if (pdata->rpu_id == 0)
-		offset = RPU_0_CFG_OFFSET;
 
 	tmp = reg_read(pdata->rpu_base, offset);
 	if (pdata->bootmem == OCM)
@@ -174,15 +172,22 @@ static void hw_r5_boot_dev(struct zynqmp_r5_rproc_pdata *pdata)
 static void hw_r5_reset(struct zynqmp_r5_rproc_pdata *pdata,
 						bool do_reset)
 {
-	u32 tmp;
+	u32 tmp, mask;
 
 	pr_debug("%s: R5 ID: %d, reset %d\n", __func__, pdata->rpu_id,
 			 do_reset);
+	if (pdata->rpu_mode == SPLIT)
+		mask = RPU0_RESET_BIT << pdata->rpu_id;
+	else
+		mask = RPU0_RESET_BIT | (RPU0_RESET_BIT << 1);
+	if (!do_reset)
+		mask |= RPU_AMBA_RST_MASK;
+
 	tmp = reg_read(pdata->crl_apb_base, RST_LPD_TOP_OFFSET);
 	if (do_reset)
-		tmp |= (RPU0_RESET_BIT << pdata->rpu_id);
+		tmp |= mask;
 	else
-		tmp &= ~((RPU0_RESET_BIT << pdata->rpu_id) | RPU_AMBA_RST_MASK);
+		tmp &= ~mask;
 	reg_write(pdata->crl_apb_base, RST_LPD_TOP_OFFSET, tmp);
 }
 
@@ -190,12 +195,10 @@ static void hw_r5_halt(struct zynqmp_r5_rproc_pdata *pdata,
 						bool do_halt)
 {
 	u32 tmp;
-	u32 offset = RPU_1_CFG_OFFSET;
+	u32 offset = RPU_CFG_OFFSET;
 
 	pr_debug("%s: R5 ID: %d, halt %d\n", __func__, pdata->rpu_id,
 			 do_halt);
-	if (pdata->rpu_id == 0)
-		offset = RPU_0_CFG_OFFSET;
 
 	tmp = reg_read(pdata->rpu_base, offset);
 	if (do_halt)
@@ -203,6 +206,15 @@ static void hw_r5_halt(struct zynqmp_r5_rproc_pdata *pdata,
 	else
 		tmp |= nCPUHALT_BIT;
 	reg_write(pdata->rpu_base, offset, tmp);
+	if (pdata->rpu_mode != SPLIT) {
+		offset += 0x100;
+		tmp = reg_read(pdata->rpu_base, offset);
+		if (do_halt)
+			tmp &= ~nCPUHALT_BIT;
+		else
+			tmp |= nCPUHALT_BIT;
+		reg_write(pdata->rpu_base, 0x100, tmp);
+	}
 }
 
 static void hw_r5_core_config(struct zynqmp_r5_rproc_pdata *pdata)
@@ -210,7 +222,7 @@ static void hw_r5_core_config(struct zynqmp_r5_rproc_pdata *pdata)
 	u32 tmp;
 
 	pr_debug("%s: mode: %d\n", __func__, pdata->rpu_mode);
-	tmp = reg_read(pdata->rpu_base, 0);
+	tmp = reg_read(pdata->rpu_glbl_base, 0);
 	if (pdata->rpu_mode == SPLIT) {
 		tmp |= SLSPLIT_BIT;
 		tmp &= ~TCM_COMB_BIT;
@@ -220,7 +232,7 @@ static void hw_r5_core_config(struct zynqmp_r5_rproc_pdata *pdata)
 		tmp |= TCM_COMB_BIT;
 		tmp |= SLCLAMP_BIT;
 	}
-	reg_write(pdata->rpu_base, 0, tmp);
+	reg_write(pdata->rpu_glbl_base, 0, tmp);
 }
 
 static void hw_r5_enable_clock(struct zynqmp_r5_rproc_pdata *pdata)
@@ -237,6 +249,46 @@ static void hw_r5_enable_clock(struct zynqmp_r5_rproc_pdata *pdata)
 	}
 }
 
+/*
+ * r5_is_running - check if r5 is running
+ * @pdata: platform data
+ *
+ * check if R5 is running
+ * @retrun: true if r5 is running, false otherwise
+ */
+static bool r5_is_running(struct zynqmp_r5_rproc_pdata *pdata)
+{
+	u32 tmp, mask;
+
+	pr_debug("%s: rpu id: %d\n", __func__, pdata->rpu_id);
+
+	tmp = reg_read(pdata->crl_apb_base, RST_LPD_TOP_OFFSET);
+	mask = RPU_AMBA_RST_MASK;
+	if (pdata->rpu_mode == SPLIT)
+		mask |= RPU0_RESET_BIT << pdata->rpu_id;
+	else
+		mask |= RPU0_RESET_BIT | (RPU0_RESET_BIT << 1);
+	if (tmp & mask)
+		return false;
+
+	if (pdata->rpu_mode == SPLIT) {
+		tmp = reg_read(pdata->rpu_base, RPU_CFG_OFFSET);
+		if (tmp & nCPUHALT_BIT)
+			return true;
+	} else {
+		u32 offset = RPU_CFG_OFFSET;
+
+		tmp = reg_read(pdata->rpu_base, offset);
+		if (!(tmp & nCPUHALT_BIT))
+			return false;
+		offset += 0x100;
+		tmp = reg_read(pdata->rpu_base, offset);
+		if (tmp & nCPUHALT_BIT)
+			return true;
+	}
+	return false;
+}
+
 /**
  * r5_request_tcm - request access to TCM
  * @pdata: platform data
@@ -245,8 +297,16 @@ static void hw_r5_enable_clock(struct zynqmp_r5_rproc_pdata *pdata)
  */
 static int r5_request_tcm(struct zynqmp_r5_rproc_pdata *pdata)
 {
-	r5_enable_clock(pdata);
-	r5_reset(pdata, false);
+	bool is_running = r5_is_running(pdata);
+
+	r5_mode_config(pdata);
+
+	if (!is_running) {
+		r5_reset(pdata, true);
+		r5_halt(pdata, true);
+		r5_enable_clock(pdata);
+		r5_reset(pdata, false);
+	}
 
 	return 0;
 }
@@ -264,49 +324,53 @@ static void r5_release_tcm(struct zynqmp_r5_rproc_pdata *pdata)
 }
 
 /**
- * ipi_init - Initialize R5 IPI
+ * disable_ipi - disable IPI
  * @pdata: platform data
  *
- * Clear IPI interrupt status register and then enable IPI interrupt.
+ * Disable IPI interrupt
  */
-static irqreturn_t hw_clear_ipi(struct zynqmp_r5_rproc_pdata *pdata)
+static inline void disable_ipi(struct zynqmp_r5_rproc_pdata *pdata)
 {
-	u32 ipi_reg = 0;
-	pr_debug("%s: irq issuer %08x clear IPI\n", __func__,
-			 pdata->ipi_dest_mask);
-	ipi_reg = reg_read(pdata->ipi_base, ISR_OFFSET);
-	if (ipi_reg & pdata->ipi_dest_mask) {
-		reg_write(pdata->ipi_base, ISR_OFFSET, pdata->ipi_dest_mask);
-		return IRQ_HANDLED;
-	}
-
-	return IRQ_NONE;
-}
-
-static void hw_ipi_reset(struct zynqmp_r5_rproc_pdata *pdata)
-{
+	/* Disable R5 IPI interrupt */
 	reg_write(pdata->ipi_base, IDR_OFFSET, pdata->ipi_dest_mask);
-	reg_write(pdata->ipi_base, ISR_OFFSET, pdata->ipi_dest_mask);
-	/* add delay to allow ipi to be settle */
-	udelay(10);
-	pr_debug("IPI reset done\n");
 }
 
-static void hw_set_ipi_mask(struct zynqmp_r5_rproc_pdata *pdata)
+/**
+ * enable_ipi - enable IPI
+ * @pdata: platform data
+ *
+ * Enable IPI interrupt
+ */
+static inline void enable_ipi(struct zynqmp_r5_rproc_pdata *pdata)
 {
-	pr_debug("%s: set IPI mask %08x\n", __func__, pdata->ipi_dest_mask);
+	/* Enable R5 IPI interrupt */
 	reg_write(pdata->ipi_base, IER_OFFSET, pdata->ipi_dest_mask);
+}
+
+/**
+ * event_notified_idr_cb - event notified idr callback
+ * @id: idr id
+ * @ptr: pointer to idr private data
+ * @data: data passed to idr_for_each callback
+ *
+ * Pass notification to remtoeproc virtio
+ */
+static int event_notified_idr_cb(int id, void *ptr, void *data)
+{
+	struct rproc *rproc = data;
+	(void)rproc_virtio_interrupt(rproc, id);
+	return 0;
 }
 
 static void handle_event_notified(struct work_struct *work)
 {
+	struct rproc *rproc;
 	struct zynqmp_r5_rproc_pdata *local = container_of(
 				work, struct zynqmp_r5_rproc_pdata,
 				workqueue);
 
-	if (rproc_vq_interrupt(local->rproc, 0) == IRQ_NONE)
-		dev_dbg(local->rproc->dev.parent,
-			"no message found in vqid 0\n");
+	rproc = local->rproc;
+	idr_for_each(&rproc->notifyids, event_notified_idr_cb, rproc);
 }
 
 
@@ -316,8 +380,6 @@ static int zynqmp_r5_rproc_start(struct rproc *rproc)
 	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
 
 	dev_dbg(dev, "%s\n", __func__);
-	if (local->rpu_id == 0)
-		INIT_WORK(&local->workqueue, handle_event_notified);
 
 	/*
 	 * Use memory barrier to make sure all write memory operations
@@ -332,7 +394,6 @@ static int zynqmp_r5_rproc_start(struct rproc *rproc)
 	dev_info(dev, "RPU boot from %s.",
 		local->bootmem == OCM ? "OCM" : "TCM");
 
-	ipi_init(local);
 	r5_mode_config(local);
 	r5_halt(local, true);
 	r5_reset(local, true);
@@ -341,6 +402,9 @@ static int zynqmp_r5_rproc_start(struct rproc *rproc)
 	udelay(500);
 	local->rpu_ops->en_reset(local, false);
 	local->rpu_ops->halt(local, false);
+
+	/* Make sure IPI is enabled */
+	enable_ipi(local);
 
 	return 0;
 }
@@ -370,12 +434,38 @@ static int zynqmp_r5_rproc_stop(struct rproc *rproc)
 {
 	struct device *dev = rproc->dev.parent;
 	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
+	struct rproc_mem_entry *mem, *nmem;
 
 	dev_dbg(dev, "%s\n", __func__);
 
+	r5_reset(local, true);
 	r5_halt(local, true);
+	r5_request_tcm(local);
+
+	disable_ipi(local);
+
+	/* After it reset was once asserted, TCM will be initialized
+	 * before it can be read. E.g. remoteproc virtio will access
+	 * TCM if vdev rsc entry is in TCM after RPU stop.
+	 * The following is to initialize the TCM.
+	 */
+	list_for_each_entry_safe(mem, nmem, &local->mems, node) {
+		if ((mem->dma & 0xFFF00000) == 0xFFE00000)
+			memset(mem->va, 0, mem->len);
+	}
 
 	return 0;
+}
+
+/* check if ZynqMP r5 is running */
+static bool zynqmp_r5_rproc_is_running(struct rproc *rproc)
+{
+	struct device *dev = rproc->dev.parent;
+	struct zynqmp_r5_rproc_pdata *local = rproc->priv;
+
+	dev_dbg(dev, "%s\n", __func__);
+
+	return r5_is_running(local);
 }
 
 static void *zynqmp_r5_rproc_da_to_va(struct rproc *rproc, u64 da, int len)
@@ -405,6 +495,7 @@ static void *zynqmp_r5_rproc_da_to_va(struct rproc *rproc, u64 da, int len)
 static struct rproc_ops zynqmp_r5_rproc_ops = {
 	.start		= zynqmp_r5_rproc_start,
 	.stop		= zynqmp_r5_rproc_stop,
+	.is_running     = zynqmp_r5_rproc_is_running,
 	.kick		= zynqmp_r5_rproc_kick,
 	.da_to_va       = zynqmp_r5_rproc_da_to_va,
 };
@@ -436,10 +527,17 @@ static int zynqmp_r5_rproc_add_mems(struct zynqmp_r5_rproc_pdata *pdata)
 		mem->va = va;
 		mem->len = mem_size;
 		mem->dma = dma;
-		if ((dma & 0xFFF00000) == 0xFFE00000)
+		/* TCM memory:
+		 *   TCM_0: da 0 <-> global addr 0xFFE00000
+		 *   TCM_1: da 0 <-> global addr 0xFFE90000
+		 */
+		if ((dma & 0xFFF00000) == 0xFFE00000) {
 			mem->da = (dma & 0x000FFFFF);
-		else
+			if ((dma & 0xFFF80000) == 0xFFE80000)
+				mem->da -= 0x90000;
+		} else {
 			mem->da = dma;
+		}
 		dev_dbg(dev, "%s: va = %p, da = 0x%x dma = 0x%llx\n",
 			__func__, va, mem->da, mem->dma);
 		list_add_tail(&mem->node, &pdata->mems);
@@ -464,6 +562,7 @@ static int zynqmp_r5_rproc_init(struct rproc *rproc)
 	if (ret)
 		return ret;
 
+	enable_ipi(local);
 	return zynqmp_r5_rproc_add_mems(local);
 }
 
@@ -530,7 +629,7 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 	int i;
 
 	rproc = rproc_alloc(&pdev->dev, dev_name(&pdev->dev),
-		&zynqmp_r5_rproc_ops, firmware,
+		&zynqmp_r5_rproc_ops, NULL,
 		sizeof(struct zynqmp_r5_rproc_pdata));
 	if (!rproc) {
 		dev_err(&pdev->dev, "rproc allocation failed\n");
@@ -576,10 +675,21 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 		"rpu_base");
-	local->rpu_base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
+	local->rpu_base = devm_ioremap(&pdev->dev, res->start,
+					resource_size(res));
 	if (IS_ERR(local->rpu_base)) {
 		dev_err(&pdev->dev, "Unable to map RPU I/O memory\n");
 		ret = PTR_ERR(local->rpu_base);
+		goto rproc_fault;
+	}
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+		"rpu_glbl_base");
+	local->rpu_glbl_base = devm_ioremap(&pdev->dev, res->start,
+					resource_size(res));
+	if (IS_ERR(local->rpu_glbl_base)) {
+		dev_err(&pdev->dev, "Unable to map RPU Global I/O memory\n");
+		ret = PTR_ERR(local->rpu_glbl_base);
 		goto rproc_fault;
 	}
 
@@ -618,6 +728,9 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 		}
 	}
 
+	/* Disable IPI before requesting IPI IRQ */
+	disable_ipi(local);
+	INIT_WORK(&local->workqueue, handle_event_notified);
 	/* IPI IRQ */
 	local->vring0 = platform_get_irq(pdev, 0);
 	if (local->vring0 < 0) {
@@ -634,11 +747,6 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 		goto rproc_fault;
 	}
 	dev_dbg(&pdev->dev, "vring0 irq: %d\n", local->vring0);
-
-	/* change firmware if the remote is RPU1*/
-	if (local->rpu_id)
-		rproc->firmware = firmware1;
-	dev_dbg(&pdev->dev, "Using firmware: %s\n", rproc->firmware);
 
 	ret = zynqmp_r5_rproc_init(local->rproc);
 	if (ret) {
@@ -708,11 +816,7 @@ static struct platform_driver zynqmp_r5_remoteproc_driver = {
 };
 module_platform_driver(zynqmp_r5_remoteproc_driver);
 
-module_param(firmware, charp, 0);
-module_param(firmware1, charp, 0);
 module_param_named(autoboot,  autoboot, bool, 0444);
-MODULE_PARM_DESC(firmware, "Override the RPU-0 firmware image name.");
-MODULE_PARM_DESC(firmware1, "Override the RPU-1 firmware image name.");
 MODULE_PARM_DESC(autoboot,
 	"enable | disable autoboot. (default: true)");
 

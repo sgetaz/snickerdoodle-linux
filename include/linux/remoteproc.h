@@ -116,7 +116,8 @@ enum fw_resource_type {
 	RSC_TRACE	= 2,
 	RSC_VDEV	= 3,
 	RSC_RPROC_MEM	= 4,
-	RSC_LAST	= 5,
+	RSC_FW_CHKSUM   = 5,
+	RSC_LAST	= 6,
 };
 
 #define FW_RSC_ADDR_ANY (-1)
@@ -326,6 +327,20 @@ struct fw_rsc_rproc_mem {
 	u32 reserved;
 } __packed;
 
+/*
+ * struct fw_rsc_fw_chksum - firmware checksum
+ * @algo: algorithm to generate the cheksum
+ * @chksum: checksum of the firmware loadable sections.
+ *
+ * This resource entry provides checksum for the firmware loadable sections.
+ * It is used to check if the remote already runs with the expected firmware to
+ * decide if it needs to start the remote if the remote is already running.
+ */
+struct fw_rsc_fw_chksum {
+	u8 algo[16];
+	u8 chksum[64];
+} __packed;
+
 /**
  * struct rproc_mem_entry - memory entry descriptor
  * @va:	virtual address
@@ -352,12 +367,14 @@ struct rproc;
  * @stop:	power off the device
  * @kick:	kick a virtqueue (virtqueue id given as a parameter)
  * @da_to_va:	optional platform hook to perform address translations
+ * @is_running: check if the remote is running
  */
 struct rproc_ops {
 	int (*start)(struct rproc *rproc);
 	int (*stop)(struct rproc *rproc);
 	void (*kick)(struct rproc *rproc, int vqid);
 	void * (*da_to_va)(struct rproc *rproc, u64 da, int len);
+	bool (*is_running)(struct rproc *rproc);
 };
 
 /**
@@ -380,7 +397,8 @@ enum rproc_state {
 	RPROC_SUSPENDED	= 1,
 	RPROC_RUNNING	= 2,
 	RPROC_CRASHED	= 3,
-	RPROC_LAST	= 4,
+	RPROC_RUNNING_INDEPENDENT = 4,
+	RPROC_LAST	= 5,
 };
 
 /**
@@ -436,7 +454,7 @@ struct rproc {
 	struct list_head node;
 	struct iommu_domain *domain;
 	const char *name;
-	const char *firmware;
+	char *firmware;
 	void *priv;
 	const struct rproc_ops *ops;
 	struct device dev;
@@ -498,6 +516,7 @@ struct rproc_vring {
  * @vdev: the virio device
  * @vring: the vrings for this vdev
  * @rsc_offset: offset of the vdev's resource entry
+ * @config_wait_complete: mark asynchronous vdev config wait complete
  */
 struct rproc_vdev {
 	struct list_head node;
@@ -505,6 +524,7 @@ struct rproc_vdev {
 	struct virtio_device vdev;
 	struct rproc_vring vring[RVDEV_NUM_VRINGS];
 	u32 rsc_offset;
+	struct completion config_wait_complete;
 };
 
 struct rproc *rproc_get_by_phandle(phandle phandle);

@@ -99,6 +99,8 @@
 #define ONFI_DATA_INTERFACE_NVDDR      BIT(4)
 #define EVENT_MASK	(XFER_COMPLETE | READ_READY | WRITE_READY | MBIT_ERROR)
 
+#define SDR_MODE_DEFLT_FREQ		80000000
+
 /**
  * struct anfc_nand_chip - Defines the nand chip related information
  * @node:		used to store NAND chips into a list.
@@ -565,7 +567,6 @@ static void anfc_cmd_function(struct mtd_info *mtd,
 	struct anfc *nfc = to_anfc(chip->controller);
 	bool wait = false, read = false;
 	u32 addrcycles, prog;
-	u32 *bufptr = (u32 *)nfc->buf;
 
 	nfc->bufshift = 0;
 	nfc->curr_cmd = cmd;
@@ -719,6 +720,7 @@ static int anfc_init_timing_mode(struct anfc *nfc,
 	u32 inftimeval;
 	struct nand_chip *chip = &achip->chip;
 	struct mtd_info *mtd = nand_to_mtd(chip);
+	bool change_sdr_clk = false;
 
 	memset(feature, 0, NVDDR_MODE_PACKET_SIZE);
 	/* Get nvddr timing modes */
@@ -726,6 +728,8 @@ static int anfc_init_timing_mode(struct anfc *nfc,
 	if (!mode) {
 		mode = fls(onfi_get_async_timing_mode(chip)) - 1;
 		inftimeval = mode;
+		if (mode >= 2 && mode <= 5)
+			change_sdr_clk = true;
 	} else {
 		mode = fls(mode) - 1;
 		inftimeval = NVDDR_MODE | (mode << NVDDR_TIMING_MODE_SHIFT);
@@ -740,6 +744,24 @@ static int anfc_init_timing_mode(struct anfc *nfc,
 	if (err)
 		return err;
 
+	/*
+	 * SDR timing modes 2-5 will not work for the arasan nand when
+	 * freq > 90 MHz, so reduce the freq in SDR modes 2-5 to < 90Mhz
+	 */
+	if (change_sdr_clk) {
+		clk_disable_unprepare(nfc->clk_sys);
+		err = clk_set_rate(nfc->clk_sys, SDR_MODE_DEFLT_FREQ);
+		if (err) {
+			dev_err(nfc->dev, "Can't set the clock rate\n");
+			return err;
+		}
+		err = clk_prepare_enable(nfc->clk_sys);
+		if (err) {
+			dev_err(nfc->dev, "Unable to enable sys clock.\n");
+			clk_disable_unprepare(nfc->clk_sys);
+			return err;
+		}
+	}
 	achip->inftimeval = inftimeval;
 
 	if (mode & ONFI_DATA_INTERFACE_NVDDR)
