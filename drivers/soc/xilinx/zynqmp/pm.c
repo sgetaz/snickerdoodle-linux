@@ -27,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/uaccess.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/debugfs.h>
 #include <linux/suspend.h>
@@ -45,6 +46,14 @@
 
 /* Payload size (consists of callback API ID + arguments) */
 #define CB_PAYLOAD_SIZE	(CB_ARG_CNT + 1)
+
+/* Global general storage register base address */
+#define GGS_BASEADDR	(0xFFD80030U)
+#define GSS_NUM_REGS	(4)
+
+/* Persistent global general storage register base address */
+#define PGGS_BASEADDR	(0xFFD80050U)
+#define PGSS_NUM_REGS	(4)
 
 #define DRIVER_NAME	"zynqmp_pm"
 
@@ -794,7 +803,7 @@ static struct dentry *zynqmp_pm_debugfs_api_version;
 static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 		    const char __user *ptr, size_t len, loff_t *off)
 {
-	char *kern_buff;
+	char *kern_buff, *tmp_buff;
 	char *pm_api_req;
 	u32 pm_id = 0;
 	u64 pm_api_arg[4];
@@ -809,6 +818,7 @@ static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 	kern_buff = kzalloc(len, GFP_KERNEL);
 	if (!kern_buff)
 		return -ENOMEM;
+	tmp_buff = kern_buff;
 
 	while (i < ARRAY_SIZE(pm_api_arg))
 		pm_api_arg[i++] = 0;
@@ -995,7 +1005,7 @@ static ssize_t zynqmp_pm_debugfs_api_write(struct file *file,
 	}
 
  err:
-	kfree(kern_buff);
+	kfree(tmp_buff);
 	if (ret)
 		return ret;
 
@@ -1214,6 +1224,321 @@ static int zynqmp_pm_sysfs_init(struct device *dev)
 }
 
 /**
+ * ggs_show - Show global general storage (ggs) sysfs attribute
+ * @dev: Device structure
+ * @attr: Device attribute structure
+ * @buf: Requested available shutdown_scope attributes string
+ * @reg: Register number
+ *
+ * Return:Number of bytes printed into the buffer.
+ *
+ * Helper function for viewing a ggs register value.
+ *
+ * User-space interface for viewing the content of the ggs0 register.
+ * cat /sys/devices/platform/firmware/ggs0
+ */
+static ssize_t ggs_show(struct device *dev,
+			struct device_attribute *attr,
+			char *buf,
+			u32 reg)
+{
+	u32 value;
+	int len;
+	int ret;
+
+	ret = zynqmp_pm_mmio_read(GGS_BASEADDR + (reg << 2), &value);
+	if (ret)
+		return ret;
+
+	len = sprintf(buf, "0x%x", (s32)value);
+	if (len <= 0)
+		return 0;
+
+	strcat(buf, "\n");
+
+	return strlen(buf);
+}
+
+/**
+ * ggs_store - Store global general storage (ggs) sysfs attribute
+ * @dev: Device structure
+ * @attr: Device attribute structure
+ * @buf: User entered shutdown_scope attribute string
+ * @count: Size of buf
+ * @reg: Register number
+ *
+ * Return: count argument if request succeeds, the corresponding
+ * error code otherwise
+ *
+ * Helper function for storing a ggs register value.
+ *
+ * For example, the user-space interface for storing a value to the
+ * ggs0 register:
+ * echo 0xFFFFFFFF 0x1234ABCD > /sys/devices/platform/firmware/ggs0
+ */
+static ssize_t ggs_store(struct device *dev,
+			 struct device_attribute *attr,
+			 const char *buf,
+			 size_t count,
+			 u32 reg)
+{
+	char *kern_buff;
+	char *inbuf;
+	char *tok;
+	long mask;
+	long value;
+	int ret;
+
+	if (!dev || !attr || !buf || !count || (reg >= GSS_NUM_REGS))
+		return -EINVAL;
+
+	kern_buff = kzalloc(count, GFP_KERNEL);
+	if (!kern_buff)
+		return -ENOMEM;
+
+	ret = strlcpy(kern_buff, buf, count);
+	if (ret < 0) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	inbuf = kern_buff;
+
+	/* Read the write mask */
+	tok = strsep(&inbuf, " ");
+	if (!tok) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	ret = kstrtol(tok, 16, &mask);
+	if (ret) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	/* Read the write value */
+	tok = strsep(&inbuf, " ");
+	if (!tok) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	ret = kstrtol(tok, 16, &value);
+	if (ret) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	ret = zynqmp_pm_mmio_write(GGS_BASEADDR + (reg << 2),
+				   (u32)mask, (u32)value);
+	if (ret)
+		ret = -EFAULT;
+
+err:
+	kfree(kern_buff);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+/* GGS register show functions */
+#define GGS0_SHOW(N) \
+	ssize_t ggs##N##_show(struct device *dev, \
+			 struct device_attribute *attr, \
+			 char *buf) \
+	{ \
+		return ggs_show(dev, attr, buf, N); \
+	}
+
+static GGS0_SHOW(0);
+static GGS0_SHOW(1);
+static GGS0_SHOW(2);
+static GGS0_SHOW(3);
+
+/* GGS register store function */
+#define GGS0_STORE(N) \
+	ssize_t ggs##N##_store(struct device *dev, \
+				   struct device_attribute *attr, \
+				   const char *buf, \
+				   size_t count) \
+	{ \
+		return ggs_store(dev, attr, buf, count, N); \
+	}
+
+static GGS0_STORE(0);
+static GGS0_STORE(1);
+static GGS0_STORE(2);
+static GGS0_STORE(3);
+
+/* GGS regsiter device attributes */
+static DEVICE_ATTR_RW(ggs0);
+static DEVICE_ATTR_RW(ggs1);
+static DEVICE_ATTR_RW(ggs2);
+static DEVICE_ATTR_RW(ggs3);
+
+#define CREATE_GGS_DEVICE(N) \
+do { \
+	if (device_create_file(&pdev->dev, &dev_attr_ggs##N)) \
+		dev_err(&pdev->dev, "unable to create ggs%d attribute\n", N); \
+} while (0)
+
+/**
+ * pggs_show - Show persistent global general storage (pggs) sysfs attribute
+ * @dev: Device structure
+ * @attr: Device attribute structure
+ * @buf: Requested available shutdown_scope attributes string
+ * @reg: Register number
+ *
+ * Return:Number of bytes printed into the buffer.
+ *
+ * Helper function for viewing a pggs register value.
+ */
+static ssize_t pggs_show(struct device *dev,
+			 struct device_attribute *attr,
+			 char *buf,
+			 u32 reg)
+{
+	u32 value;
+	int len;
+	int ret;
+
+	ret = zynqmp_pm_mmio_read(PGGS_BASEADDR + (reg << 2), &value);
+	if (ret)
+		return ret;
+
+	len = sprintf(buf, "0x%x", (s32)value);
+	if (len <= 0)
+		return 0;
+
+	strcat(buf, "\n");
+
+	return strlen(buf);
+}
+
+/**
+ * pggs_store - Store persistent global general storage (pggs) sysfs attribute
+ * @dev: Device structure
+ * @attr: Device attribute structure
+ * @buf: User entered shutdown_scope attribute string
+ * @count: Size of buf
+ * @reg: Register number
+ *
+ * Return: count argument if request succeeds, the corresponding
+ * error code otherwise
+ *
+ * Helper function for storing a pggs register value.
+ */
+static ssize_t pggs_store(struct device *dev,
+			  struct device_attribute *attr,
+			  const char *buf,
+			  size_t count,
+			  u32 reg)
+{
+	char *kern_buff;
+	char *inbuf;
+	char *tok;
+	long mask;
+	long value;
+	int ret;
+
+	if (!dev || !attr || !buf || !count || (reg >= PGSS_NUM_REGS))
+		return -EINVAL;
+
+	kern_buff = kzalloc(count, GFP_KERNEL);
+	if (!kern_buff)
+		return -ENOMEM;
+
+	ret = strlcpy(kern_buff, buf, count);
+	if (ret < 0) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	inbuf = kern_buff;
+
+	/* Read the write mask */
+	tok = strsep(&inbuf, " ");
+	if (!tok) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	ret = kstrtol(tok, 16, &mask);
+	if (ret) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	/* Read the write value */
+	tok = strsep(&inbuf, " ");
+	if (!tok) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	ret = kstrtol(tok, 16, &value);
+	if (ret) {
+		ret = -EFAULT;
+		goto err;
+	}
+
+	ret = zynqmp_pm_mmio_write(PGGS_BASEADDR + (reg << 2),
+				   (u32)mask, (u32)value);
+	if (ret)
+		ret = -EFAULT;
+
+err:
+	kfree(kern_buff);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+#define PGGS0_SHOW(N) \
+	ssize_t pggs##N##_show(struct device *dev, \
+			 struct device_attribute *attr, \
+			 char *buf) \
+	{ \
+		return pggs_show(dev, attr, buf, N); \
+	}
+
+/* PGGS register show functions */
+static PGGS0_SHOW(0);
+static PGGS0_SHOW(1);
+static PGGS0_SHOW(2);
+static PGGS0_SHOW(3);
+
+#define PGGS0_STORE(N) \
+	ssize_t pggs##N##_store(struct device *dev, \
+				   struct device_attribute *attr, \
+				   const char *buf, \
+				   size_t count) \
+	{ \
+		return pggs_store(dev, attr, buf, count, N); \
+	}
+
+/* PGGS register store functions */
+static PGGS0_STORE(0);
+static PGGS0_STORE(1);
+static PGGS0_STORE(2);
+static PGGS0_STORE(3);
+
+/* PGGS register device attributes */
+static DEVICE_ATTR_RW(pggs0);
+static DEVICE_ATTR_RW(pggs1);
+static DEVICE_ATTR_RW(pggs2);
+static DEVICE_ATTR_RW(pggs3);
+
+#define CREATE_PGGS_DEVICE(N) \
+do { \
+	if (device_create_file(&pdev->dev, &dev_attr_pggs##N)) \
+		dev_err(&pdev->dev, "unable to create pggs%d attribute\n", N); \
+} while (0)
+
+/**
  * zynqmp_pm_probe - Probe existence of the PMU Firmware
  *			and initialize debugfs interface
  *
@@ -1225,6 +1550,8 @@ static int zynqmp_pm_sysfs_init(struct device *dev)
 static int zynqmp_pm_probe(struct platform_device *pdev)
 {
 	int ret, irq;
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *pins_default;
 
 	/* Check PM API version number */
 	if (pm_api_version != ZYNQMP_PM_VERSION)
@@ -1263,6 +1590,30 @@ static int zynqmp_pm_probe(struct platform_device *pdev)
 
 	zynqmp_pm_api_debugfs_init(&pdev->dev);
 
+	pinctrl = devm_pinctrl_get(&pdev->dev);
+	if (!IS_ERR(pinctrl)) {
+		pins_default = pinctrl_lookup_state(pinctrl,
+						    PINCTRL_STATE_DEFAULT);
+		if (IS_ERR(pins_default)) {
+			dev_err(&pdev->dev, "Missing default pinctrl config\n");
+			return IS_ERR(pins_default);
+		}
+
+		pinctrl_select_state(pinctrl, pins_default);
+	}
+
+	/* Create Global General Storage register. */
+	CREATE_GGS_DEVICE(0);
+	CREATE_GGS_DEVICE(1);
+	CREATE_GGS_DEVICE(2);
+	CREATE_GGS_DEVICE(3);
+
+	/* Create Persistent Global General Storage register. */
+	CREATE_PGGS_DEVICE(0);
+	CREATE_PGGS_DEVICE(1);
+	CREATE_PGGS_DEVICE(2);
+	CREATE_PGGS_DEVICE(3);
+
 	return 0;
 
 error:
@@ -1284,6 +1635,12 @@ static int __init zynqmp_plat_init(void)
 	struct device_node *np;
 	int ret = 0;
 
+	np = of_find_compatible_node(NULL, NULL, "xlnx,zynqmp");
+	if (!np)
+		return 0;
+	of_node_put(np);
+
+	/* We're running on a ZynqMP machine, the PM node is mandatory. */
 	np = of_find_compatible_node(NULL, NULL, "xlnx,zynqmp-pm");
 	if (!np)
 		panic("%s: pm node not found\n", __func__);

@@ -129,11 +129,12 @@
 	phy-mode = "rgmii-id";
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_gem3_default>;
-	phy0: phy@21 {
-		reg = <21>;
+	phy0: phy@c {
+		reg = <0xc>;
 		ti,rx-internal-delay = <0x8>;
 		ti,tx-internal-delay = <0xa>;
 		ti,fifo-depth = <0x1>;
+		ti,rxctrl-strap-worka;
 	};
 };
 
@@ -640,7 +641,6 @@
 
 &xilinx_drm {
 	status = "okay";
-	clocks = <&si570_1>;
 };
 
 &xlnx_dp {
@@ -651,7 +651,6 @@
 
 &xlnx_dp_sub {
 	status = "okay";
-	xlnx,vid-clk-pl;
 };
 
 &xlnx_dp_snd_pcm0 {
@@ -675,6 +674,7 @@
 };
 
 &pinctrl0 {
+	status = "okay";
 	pinctrl_i2c0_default: i2c0-default {
 		mux {
 			groups = "i2c0_3_grp";

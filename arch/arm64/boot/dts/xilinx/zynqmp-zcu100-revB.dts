@@ -156,6 +156,11 @@
 	status = "okay";
 };
 
+&pmufw {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_pmu_default>;
+};
+
 &gpio {
 	status = "okay";
 };
@@ -213,18 +218,6 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			reg = <0x4>;
-
-			/* Also RTC, GPIO and regulators */
-			/*
-			CONFIG_GPIO_TPS6586X
-			CONFIG_MFD_TPS6586X
-			CONFIG_REGULATOR_TPS6586X
-			CONFIG_RTC_DRV_TPS6586X -- not sure about it
-				 - max addr is 0xcd
-			*/
-			/* rtc0 = "/i2c@7000d000/tps6586x@34"; */
-
-			/* also super fast mode 1M supported */
 
 			/* Comment it out because will be pre-programmed
 			   at the factory */
@@ -380,6 +373,7 @@
 };
 
 &pinctrl0 {
+	status = "okay";
 	pinctrl_i2c1_default: i2c1-default {
 		mux {
 			groups = "i2c1_1_grp";
@@ -402,6 +396,20 @@
 
 		conf {
 			groups = "gpio0_4_grp", "gpio0_5_grp";
+			slew-rate = <SLEW_RATE_SLOW>;
+			io-standard = <IO_STANDARD_LVCMOS18>;
+		};
+	};
+
+	pinctrl_pmu_default: pmu-default {
+		mux {
+			groups = "pmu0_8_grp";
+			function = "pmu0";
+		};
+
+		conf {
+			groups = "pmu0_8_grp";
+			bias-pull-up;
 			slew-rate = <SLEW_RATE_SLOW>;
 			io-standard = <IO_STANDARD_LVCMOS18>;
 		};
@@ -671,6 +679,7 @@
 	dr_mode = "peripheral";
 	phy-names = "usb3-phy";
 	phys = <&lane2 PHY_TYPE_USB3 0 0 26000000>;
+	maximum-speed = "super-speed";
 };
 
 /* ULPI SMSC USB3320 */
@@ -685,6 +694,7 @@
 	dr_mode = "host";
 	phy-names = "usb3-phy";
 	phys = <&lane3 PHY_TYPE_USB3 1 0 26000000>;
+	maximum-speed = "super-speed";
 };
 
 &xilinx_drm {
@@ -719,5 +729,13 @@
 };
 
 &xlnx_dpdma {
+	status = "okay";
+};
+
+&xilinx_ams {
+	status = "okay";
+};
+
+&ams_ps {
 	status = "okay";
 };

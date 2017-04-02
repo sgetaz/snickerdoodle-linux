@@ -265,10 +265,10 @@ static int macb_mdio_write(struct mii_bus *bus, int mii_id, int regnum,
 }
 
 /**
- * macb_set_tx_clk() - Set a clock to a new frequency
- * @clk		Pointer to the clock to change
- * @rate	New frequency in Hz
- * @dev		Pointer to the struct net_device
+ * macb_set_tx_clk - Set a clock to a new frequency
+ * @clk:	Pointer to the clock to change
+ * @speed:	New frequency in Hz
+ * @dev:	Pointer to the struct net_device
  */
 static void macb_set_tx_clk(struct clk *clk, int speed, struct net_device *dev)
 {
@@ -1942,11 +1942,7 @@ static int macb_ptp_adjtime(struct ptp_clock_info *ptp, s64 delta)
 
 	if (delta > 0x3FFFFFFF) {
 		macb_ptp_read(bp, (struct timespec64 *)&now);
-
-		if (sign)
-			now = timespec_sub(now, then);
-		else
-			now = timespec_add(now, then);
+		now = timespec_add(now, then);
 
 		macb_ptp_write(bp, (const struct timespec64 *)&now);
 	} else {
@@ -3645,16 +3641,13 @@ static int macb_remove(struct platform_device *pdev)
 			gpiod_set_value(bp->reset_gpio, 0);
 
 		unregister_netdev(dev);
-		clk_disable_unprepare(bp->tx_clk);
-		clk_disable_unprepare(bp->hclk);
-		clk_disable_unprepare(bp->pclk);
-		clk_disable_unprepare(bp->rx_clk);
 		pm_runtime_disable(&pdev->dev);
 		pm_runtime_dont_use_autosuspend(&pdev->dev);
 		if (!pm_runtime_suspended(&pdev->dev)) {
 			clk_disable_unprepare(bp->tx_clk);
 			clk_disable_unprepare(bp->hclk);
 			clk_disable_unprepare(bp->pclk);
+			clk_disable_unprepare(bp->rx_clk);
 			pm_runtime_set_suspended(&pdev->dev);
 		}
 		of_node_put(bp->phy_node);
@@ -3670,13 +3663,8 @@ static int __maybe_unused macb_suspend(struct device *dev)
 	struct net_device *netdev = platform_get_drvdata(pdev);
 	struct macb *bp = netdev_priv(netdev);
 
-	netif_carrier_off(netdev);
-	netif_device_detach(netdev);
-
-	clk_disable_unprepare(bp->tx_clk);
-	clk_disable_unprepare(bp->hclk);
-	clk_disable_unprepare(bp->pclk);
-	clk_disable_unprepare(bp->rx_clk);
+	if (netif_running(netdev))
+		macb_close(netdev);
 
 	return 0;
 }
@@ -3687,12 +3675,8 @@ static int __maybe_unused macb_resume(struct device *dev)
 	struct net_device *netdev = platform_get_drvdata(pdev);
 	struct macb *bp = netdev_priv(netdev);
 
-	clk_prepare_enable(bp->pclk);
-	clk_prepare_enable(bp->hclk);
-	clk_prepare_enable(bp->tx_clk);
-	clk_prepare_enable(bp->rx_clk);
-
-	netif_device_attach(netdev);
+	if (netif_running(netdev))
+		macb_open(netdev);
 
 	return 0;
 }

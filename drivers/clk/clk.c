@@ -217,17 +217,15 @@ static void clk_show_subtree(struct clk_core *c,
 	if (level == 1)
 		sibling++;
 
-	hlist_for_each_entry(child, &c->children, child_node) {
-		if (!child)
-			return;
+	hlist_for_each_entry(child, &c->children, child_node)
 		clk_show_subtree(child, level + 1);
-	}
 }
 
 unsigned int clk_get_children(char *name)
 {
 	struct clk_core *core;
 	struct clk *pclk = __clk_lookup(name);
+	sibling = 0;
 
 	core = pclk->core;
 	clk_show_subtree(core, 0);

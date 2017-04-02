@@ -134,6 +134,7 @@
 		ti,rx-internal-delay = <0x8>;
 		ti,tx-internal-delay = <0xa>;
 		ti,fifo-depth = <0x1>;
+		ti,rxctrl-strap-worka;
 	};
 };
 
@@ -577,6 +578,7 @@ drivers/hwmon/pmbus/Makefile:11:obj-$(CONFIG_SENSORS_MAX20751)  += max20751.o
 };
 
 &pinctrl0 {
+	status = "okay";
 	pinctrl_i2c0_default: i2c0-default {
 		mux {
 			groups = "i2c0_3_grp";

@@ -551,7 +551,7 @@ static void __init zynqmp_clk_setup(struct device_node *np)
 			8, 6, CLK_DIVIDER_ONE_BASED | CLK_DIVIDER_ALLOW_ZERO);
 
 	clks[rpll_to_fpd] = zynqmp_clk_register_divider(NULL, "rpll_to_fpd",
-			clk_output_name[rpll], 0,
+			clk_output_name[rpll], CLK_SET_RATE_PARENT,
 			(resource_size_t *)CRL_APB_RPLL_TO_FPD_CTRL, 8,
 			6, CLK_DIVIDER_ONE_BASED | CLK_DIVIDER_ALLOW_ZERO);
 
@@ -746,7 +746,7 @@ static void __init zynqmp_clk_setup(struct device_node *np)
 			CRF_APB_DP_VIDEO_REF_CTRL,
 			periph_parents[dp_video_ref], 1, 1, 24);
 
-	zynqmp_clk_register_periph_clk(0, dp_audio_ref,
+	zynqmp_clk_register_periph_clk(CLK_SET_RATE_PARENT, dp_audio_ref,
 			clk_output_name[dp_audio_ref],
 			CRF_APB_DP_AUDIO_REF_CTRL,
 			periph_parents[dp_audio_ref], 1, 1, 24);
@@ -1126,20 +1126,3 @@ static int __init zynqmp_clock_init(void)
 	return 0;
 }
 arch_initcall(zynqmp_clock_init);
-
-static int __init warn_vpll_multiuser(void)
-{
-	unsigned int children;
-
-	children = clk_get_children("vpll");
-/*
- * Account for vpll_to_lpd and dp_video_ref
- *
- */
-	if (children > 2) {
-		pr_err("Two devices are using vpll which is forbidden\n");
-		BUG();
-	}
-	return 0;
-}
-late_initcall_sync(warn_vpll_multiuser);
