@@ -363,7 +363,7 @@ static int krtkl_lstnr_probe(struct platform_device *pdev)
 	/* Set the default threshold*/
 	reg = krtkl_lstnr.regs->ctrl;
 	reg &= ~(KRTKL_LSTNR_CMD_REQ_VAL);
-	reg |= (KRTKL_LSTNR_BRAM_SIZE/2-1) << KRTKL_LSTNR_FIFO_THRESHOLD_SHIFT;
+	reg |= (KRTKL_LSTNR_BRAM_SIZE-1) << KRTKL_LSTNR_FIFO_THRESHOLD_SHIFT;
 	krtkl_lstnr.regs->ctrl = reg;
 
 	return 0;
