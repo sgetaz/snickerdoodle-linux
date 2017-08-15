@@ -3558,7 +3558,7 @@ static int macb_probe(struct platform_device *pdev)
 	err = register_netdev(dev);
 	if (err) {
 		dev_err(&pdev->dev, "Cannot register net device, aborting.\n");
-		goto err_out_unregister_netdev;
+		goto err_out_free_netdev;
 	}
 
 	bp->phy_node = of_parse_phandle(bp->pdev->dev.of_node,
@@ -3592,6 +3592,9 @@ err_out_unregister_netdev:
 	unregister_netdev(dev);
 
 err_out_free_netdev:
+	if (bp->reset_gpio)
+		gpiod_set_value(bp->reset_gpio, 0);
+
 	free_netdev(dev);
 
 failed_phy:
