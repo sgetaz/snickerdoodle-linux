@@ -376,7 +376,7 @@ static struct irq_chip xgpio_irqchip = {
  * Return:
  * irq number otherwise -EINVAL
  */
-static int xgpio_to_irq(struct gpio_chip *gc, unsigned offset)
+static int xgpio_to_irq(struct gpio_chip *gc, unsigned int offset)
 {
 	struct of_mm_gpio_chip *mm_gc = to_of_mm_gpio_chip(gc);
 	struct xgpio_instance *chip = container_of(mm_gc, struct xgpio_instance,
@@ -387,7 +387,6 @@ static int xgpio_to_irq(struct gpio_chip *gc, unsigned offset)
 
 /**
  * xgpio_irqhandler - Gpio interrupt service routine
- * @irq: gpio irq number
  * @desc: Pointer to interrupt description
  */
 static void xgpio_irqhandler(struct irq_desc *desc)
@@ -433,6 +432,7 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 	struct resource res;
 
 	int ret = of_irq_to_resource(np, 0, &res);
+
 	if (!ret) {
 		pr_info("GPIO IRQ not connected\n");
 		return 0;
@@ -455,6 +455,7 @@ static int xgpio_irq_setup(struct device_node *np, struct xgpio_instance *chip)
 	 */
 	for (pin_num = 0; pin_num < chip->mmchip.gc.ngpio; pin_num++) {
 		u32 gpio_irq = irq_find_mapping(chip->irq_domain, pin_num);
+
 		irq_set_lockdep_class(gpio_irq, &gpio_lock_class);
 		pr_debug("IRQ Base: %d, Pin %d = IRQ %d\n",
 			chip->irq_base,	pin_num, gpio_irq);
@@ -487,9 +488,16 @@ static void xgpio_free(struct gpio_chip *chip, unsigned int offset)
 static int __maybe_unused xgpio_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
-	int irq = platform_get_irq(pdev, 0);
-	struct irq_data *data = irq_get_irq_data(irq);
+	int irq;
+	struct irq_data *data;
 
+	irq = platform_get_irq(pdev, 0);
+	if (irq <= 0) {
+		dev_dbg(dev, "failed to get IRQ\n");
+		return 0;
+	}
+
+	data = irq_get_irq_data(irq);
 	if (!irqd_is_wakeup_set(data))
 		return pm_runtime_force_suspend(dev);
 
@@ -499,9 +507,17 @@ static int __maybe_unused xgpio_suspend(struct device *dev)
 static int __maybe_unused xgpio_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
-	int irq = platform_get_irq(pdev, 0);
-	struct irq_data *data = irq_get_irq_data(irq);
+	int irq;
+	struct irq_data *data;
 
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq <= 0) {
+		dev_dbg(dev, "failed to get IRQ\n");
+		return 0;
+	}
+
+	data = irq_get_irq_data(irq);
 	if (!irqd_is_wakeup_set(data))
 		return pm_runtime_force_resume(dev);
 
@@ -551,7 +567,7 @@ static int xgpio_remove(struct platform_device *pdev)
 
 /**
  * xgpio_of_probe - Probe method for the GPIO device.
- * @np: pointer to device tree node
+ * @pdev:       platform device instance
  *
  * This function probes the GPIO device in the device tree. It initializes the
  * driver data structure.

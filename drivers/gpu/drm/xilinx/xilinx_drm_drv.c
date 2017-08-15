@@ -147,14 +147,6 @@ unsigned int xilinx_drm_get_align(struct drm_device *drm)
 	return xilinx_drm_crtc_get_align(private->crtc);
 }
 
-void xilinx_drm_set_config(struct drm_device *drm, struct drm_mode_set *set)
-{
-	struct xilinx_drm_private *private = drm->dev_private;
-
-	if (private && private->fb)
-		xilinx_drm_fb_set_config(private->fb, set);
-}
-
 /* poll changed handler */
 static void xilinx_drm_output_poll_changed(struct drm_device *drm)
 {
@@ -426,7 +418,7 @@ static int xilinx_drm_unload(struct drm_device *drm)
 	return 0;
 }
 
-int xilinx_drm_open(struct drm_device *dev, struct drm_file *file)
+static int xilinx_drm_open(struct drm_device *dev, struct drm_file *file)
 {
 	struct xilinx_drm_private *private = dev->dev_private;
 
@@ -554,6 +546,11 @@ static int xilinx_drm_pm_resume(struct device *dev)
 			connector->funcs->dpms(connector, dpms);
 		}
 	}
+	drm_modeset_unlock_all(drm);
+
+	drm_helper_resume_force_mode(drm);
+
+	drm_modeset_lock_all(drm);
 	drm_kms_helper_poll_enable_locked(drm);
 	drm_modeset_unlock_all(drm);
 
@@ -581,6 +578,13 @@ static int xilinx_drm_platform_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static void xilinx_drm_platform_shutdown(struct platform_device *pdev)
+{
+	struct xilinx_drm_private *private = platform_get_drvdata(pdev);
+
+	drm_put_dev(private->drm);
+}
+
 static const struct of_device_id xilinx_drm_of_match[] = {
 	{ .compatible = "xlnx,drm", },
 	{ /* end of table */ },
@@ -590,6 +594,7 @@ MODULE_DEVICE_TABLE(of, xilinx_drm_of_match);
 static struct platform_driver xilinx_drm_private_driver = {
 	.probe			= xilinx_drm_platform_probe,
 	.remove			= xilinx_drm_platform_remove,
+	.shutdown		= xilinx_drm_platform_shutdown,
 	.driver			= {
 		.name		= "xilinx-drm",
 		.pm		= &xilinx_drm_pm_ops,

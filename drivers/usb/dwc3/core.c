@@ -35,6 +35,7 @@
 #include <linux/of.h>
 #include <linux/acpi.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/of_address.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
@@ -461,6 +462,38 @@ static void dwc3_cache_hwparams(struct dwc3 *dwc)
 	parms->hwparams8 = dwc3_readl(dwc->regs, DWC3_GHWPARAMS8);
 }
 
+static int dwc3_config_soc_bus(struct dwc3 *dwc)
+{
+	int ret;
+
+	/*
+	 * Check if CCI is enabled for USB. Returns true
+	 * if the node has property 'dma-coherent'. Otherwise
+	 * returns false.
+	 */
+	if (of_dma_is_coherent(dwc->dev->of_node)) {
+		u32 reg;
+
+		reg = dwc3_readl(dwc->regs, DWC3_GSBUSCFG0);
+		reg |= DWC3_GSBUSCFG0_DATRDREQINFO |
+			DWC3_GSBUSCFG0_DESRDREQINFO |
+			DWC3_GSBUSCFG0_DATWRREQINFO |
+			DWC3_GSBUSCFG0_DESWRREQINFO;
+		dwc3_writel(dwc->regs, DWC3_GSBUSCFG0, reg);
+
+		ret = dwc3_enable_hw_coherency(dwc->dev);
+		if (ret)
+			return ret;
+	}
+
+	/* Send struct dwc3 to dwc3-of-simple for configuring VBUS
+	 * during suspend/resume
+	 */
+	dwc3_set_simple_data(dwc);
+
+	return 0;
+}
+
 /**
  * dwc3_phy_setup - Configure USB PHY Interface of DWC3 Core
  * @dwc: Pointer to our controller context structure
@@ -656,6 +689,10 @@ static int dwc3_core_init(struct dwc3 *dwc)
 	if (ret)
 		goto err0;
 
+	ret = dwc3_config_soc_bus(dwc);
+	if (ret)
+		goto err0;
+
 	ret = dwc3_phy_setup(dwc);
 	if (ret)
 		goto err0;
@@ -790,6 +827,32 @@ static int dwc3_core_init(struct dwc3 *dwc)
 		dwc3_writel(dwc->regs, DWC3_GUCTL2, reg);
 	}
 
+	/* When configured in HOST mode, after issuing U3/L2 exit controller
+	 * fails to send proper CRC checksum in CRC5 feild. Because of this
+	 * behaviour Transaction Error is generated, resulting in reset and
+	 * re-enumeration of usb device attached. Enabling bit 10 of GUCTL1
+	 * will correct this problem
+	 */
+	if (dwc->enable_guctl1_resume_quirk) {
+		reg = dwc3_readl(dwc->regs, DWC3_GUCTL1);
+		reg |= DWC3_GUCTL1_RESUME_QUIRK;
+		dwc3_writel(dwc->regs, DWC3_GUCTL1, reg);
+	}
+
+	/* SNPS controller when configureed in HOST mode maintains Inter Packet
+	 * Delay (IPD) of ~380ns which works with most of the super-speed hubs
+	 * except VIA-LAB hubs. When IPD is ~380ns HOST controller fails to
+	 * enumerate FS/LS devices when connected behind VIA-LAB hubs.
+	 * Enabling bit 9 of GUCTL1 enables the workaround in HW to reduce the
+	 * ULPI clock latency by 1 cycle, thus reducing the IPD (~360ns) and
+	 * making controller enumerate FS/LS devices connected behind VIA-LAB.
+	 */
+	if (dwc->enable_guctl1_ipd_quirk) {
+		reg = dwc3_readl(dwc->regs, DWC3_GUCTL1);
+		reg |= DWC3_GUCTL1_IPD_QUIRK;
+		dwc3_writel(dwc->regs, DWC3_GUCTL1, reg);
+	}
+
 	return 0;
 
 err4:
@@ -861,6 +924,8 @@ static int dwc3_core_get_phy(struct dwc3 *dwc)
 			dev_err(dev, "no usb2 phy configured\n");
 			return ret;
 		}
+	} else {
+		dwc3_set_phydata(dev, dwc->usb2_generic_phy);
 	}
 
 	dwc->usb3_generic_phy = devm_phy_get(dev, "usb3-phy");
@@ -874,6 +939,8 @@ static int dwc3_core_get_phy(struct dwc3 *dwc)
 			dev_err(dev, "no usb3 phy configured\n");
 			return ret;
 		}
+	} else {
+		dwc3_set_phydata(dev, dwc->usb3_generic_phy);
 	}
 
 	return 0;
@@ -959,6 +1026,7 @@ static int dwc3_probe(struct platform_device *pdev)
 	u8			lpm_nyet_threshold;
 	u8			tx_de_emphasis;
 	u8			hird_threshold;
+	u32			mdwidth;
 
 	int			ret;
 
@@ -1067,12 +1135,19 @@ static int dwc3_probe(struct platform_device *pdev)
 
 	dwc->refclk_fladj = device_property_read_bool(dev,
 						      "snps,refclk_fladj");
+	dwc->enable_guctl1_resume_quirk = device_property_read_bool(dev,
+				"snps,enable_guctl1_resume_quirk");
+	dwc->enable_guctl1_ipd_quirk = device_property_read_bool(dev,
+				"snps,enable_guctl1_ipd_quirk");
 
 	dwc->lpm_nyet_threshold = lpm_nyet_threshold;
 	dwc->tx_de_emphasis = tx_de_emphasis;
 
 	dwc->hird_threshold = hird_threshold
 		| (dwc->is_utmi_l1_suspend << 4);
+
+	/* Check if extra quirks to be added */
+	dwc3_simple_check_quirks(dwc);
 
 	platform_set_drvdata(pdev, dwc);
 	dwc3_cache_hwparams(dwc);
@@ -1086,8 +1161,12 @@ static int dwc3_probe(struct platform_device *pdev)
 	if (!dev->dma_mask) {
 		dev->dma_mask = dev->parent->dma_mask;
 		dev->dma_parms = dev->parent->dma_parms;
-		dma_set_coherent_mask(dev, dev->parent->coherent_dma_mask);
 	}
+
+	/* Set dma coherent mask to DMA BUS data width */
+	mdwidth = DWC3_GHWPARAMS0_MDWIDTH(dwc->hwparams.hwparams0);
+	dev_dbg(dev, "Enabling %d-bit DMA addresses.\n", mdwidth);
+	dma_set_coherent_mask(dev, DMA_BIT_MASK(mdwidth));
 
 	pm_runtime_set_active(dev);
 	pm_runtime_use_autosuspend(dev);
@@ -1347,6 +1426,16 @@ static int dwc3_suspend(struct device *dev)
 {
 	struct dwc3	*dwc = dev_get_drvdata(dev);
 	int		ret;
+
+	/* Inform dwc3-of-simple about wakeup capability when dr_mode is set
+	 * to peripheral mode only. xhci-plat.c takes care of host mode.
+	 */
+	if (dwc->dr_mode != USB_DR_MODE_HOST) {
+		if (dwc->remote_wakeup)
+			dwc3_simple_wakeup_capable(dev, true);
+		else
+			dwc3_simple_wakeup_capable(dev, false);
+	}
 
 	ret = dwc3_suspend_common(dwc);
 	if (ret)

@@ -172,6 +172,12 @@
 #define DWC3_DESCFETCHQ		13
 #define DWC3_EVENTQ		15
 
+/* Global SoC Bus Configuration Register */
+#define DWC3_GSBUSCFG0_DATRDREQINFO	(0xf << 28)
+#define DWC3_GSBUSCFG0_DESRDREQINFO	(0xf << 24)
+#define DWC3_GSBUSCFG0_DATWRREQINFO	(0xf << 20)
+#define DWC3_GSBUSCFG0_DESWRREQINFO	(0xf << 16)
+
 /* Global RX Threshold Configuration Register */
 #define DWC3_GRXTHRCFG_MAXRXBURSTSIZE(n) (((n) & 0x1f) << 19)
 #define DWC3_GRXTHRCFG_RXPKTCNT(n) (((n) & 0xf) << 24)
@@ -295,6 +301,10 @@
 #define DWC3_GFLADJ_30MHZ_SDBND_SEL		(1 << 7)
 #define DWC3_GFLADJ_30MHZ_MASK			0x3f
 #define DWC3_GFLADJ_REFCLK_FLADJ		(0x3fff << 8)
+
+/* Global User Control Register 1 */
+#define DWC3_GUCTL1_RESUME_QUIRK		(1 << 10)
+#define DWC3_GUCTL1_IPD_QUIRK			(1 << 9)
 
 /* Global User Control Register 2 */
 #define DWC3_GUCTL2_RST_ACTBITLATER		(1 << 14)
@@ -834,6 +844,10 @@ struct dwc3_scratchpad_array {
  *			provide a free-running PHY clock.
  * @dis_del_phy_power_chg_quirk: set if we disable delay phy power
  *			change quirk.
+ * @enable_guctl1_resume_quirk: Set if we enable quirk for fixing improper crc
+ *			generation after resume from suspend.
+ * @enable_guctl1_ipd_quirk: set if we enable quirk for reducing timing of inter
+ *			packet delay(ipd).
  * @tx_de_emphasis_quirk: set if we enable Tx de-emphasis quirk
  * @tx_de_emphasis: Tx de-emphasis value
  * 	0	- -6dB de-emphasis
@@ -986,6 +1000,8 @@ struct dwc3 {
 	unsigned		dis_rxdet_inp3_quirk:1;
 	unsigned		dis_u2_freeclk_exists_quirk:1;
 	unsigned		dis_del_phy_power_chg_quirk:1;
+	unsigned		enable_guctl1_resume_quirk:1;
+	unsigned		enable_guctl1_ipd_quirk:1;
 
 	unsigned		tx_de_emphasis_quirk:1;
 	unsigned		tx_de_emphasis:2;
@@ -1149,6 +1165,25 @@ static inline bool dwc3_is_usb31(struct dwc3 *dwc)
 {
 	return !!(dwc->revision & DWC3_REVISION_IS_DWC31);
 }
+
+#if IS_ENABLED(CONFIG_USB_DWC3_OF_SIMPLE)
+int dwc3_enable_hw_coherency(struct device *dev);
+void dwc3_set_phydata(struct device *dev, struct phy *phy);
+void dwc3_simple_wakeup_capable(struct device *dev, bool wakeup);
+void dwc3_set_simple_data(struct dwc3 *dwc);
+void dwc3_simple_check_quirks(struct dwc3 *dwc);
+#else
+static inline int dwc3_enable_hw_coherency(struct device *dev)
+{ return 1; }
+static inline void dwc3_set_phydata(struct device *dev, struct phy *phy)
+{ ; }
+void dwc3_simple_wakeup_capable(struct device *dev, bool wakeup)
+{ ; }
+void dwc3_set_simple_data(struct dwc3 *dwc)
+{ ; }
+void dwc3_simple_check_quirks(struct dwc3 *dwc)
+{ ; }
+#endif
 
 #if IS_ENABLED(CONFIG_USB_DWC3_HOST) || IS_ENABLED(CONFIG_USB_DWC3_DUAL_ROLE)\
 	 || IS_ENABLED(CONFIG_USB_DWC3_OTG)
