@@ -105,6 +105,7 @@
  * @aclk: axi clock source
  * @logicore_reg_ba: logicore reg base address
  * @vcu_slcr_ba: vcu_slcr Register base address
+ * @coreclk: core clock frequency
  */
 struct xvcu_device {
 	struct device *dev;
@@ -112,6 +113,7 @@ struct xvcu_device {
 	struct clk *aclk;
 	void __iomem *logicore_reg_ba;
 	void __iomem *vcu_slcr_ba;
+	u32 coreclk;
 };
 
 /**
@@ -280,6 +282,19 @@ static void xvcu_write_field_reg(void __iomem *iomem, int offset,
 }
 
 /**
+ * xvcu_get_color_depth - read the color depth register
+ * @xvcu:	Pointer to the xvcu_device structure
+ *
+ * Return:	Returns 32bit value
+ *
+ */
+u32 xvcu_get_color_depth(struct xvcu_device *xvcu)
+{
+	return xvcu_read(xvcu->logicore_reg_ba, VCU_ENC_COLOR_DEPTH);
+}
+EXPORT_SYMBOL_GPL(xvcu_get_color_depth);
+
+/**
  * xvcu_get_memory_depth - read the memory depth register
  * @xvcu:	Pointer to the xvcu_device structure
  *
@@ -390,10 +405,10 @@ static int xvcu_set_vcu_pll_info(struct xvcu_device *xvcu)
 		return -EINVAL;
 	}
 
-	coreclk = pll_clk / divisor_core;
+	xvcu->coreclk = pll_clk / divisor_core;
 	mcuclk = pll_clk / divisor_mcu;
 	dev_dbg(xvcu->dev, "Actual Ref clock freq is %uHz\n", refclk);
-	dev_dbg(xvcu->dev, "Actual Core clock freq is %uHz\n", coreclk);
+	dev_dbg(xvcu->dev, "Actual Core clock freq is %uHz\n", xvcu->coreclk);
 	dev_dbg(xvcu->dev, "Actual Mcu clock freq is %uHz\n", mcuclk);
 
 	vcu_pll_ctrl &= ~(VCU_PLL_CTRL_FBDIV_MASK << VCU_PLL_CTRL_FBDIV_SHIFT);

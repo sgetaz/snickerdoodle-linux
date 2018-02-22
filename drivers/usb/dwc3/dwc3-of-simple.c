@@ -46,6 +46,22 @@
 #define ULPI_OTG_CTRL_CLEAR		0XC
 #define OTG_CTRL_DRVVBUS_OFFSET		5
 
+#define XLNX_USB_CUR_PWR_STATE          0x0000
+#define XLNX_CUR_PWR_STATE_D0           0x00
+#define XLNX_CUR_PWR_STATE_D3           0x0F
+#define XLNX_CUR_PWR_STATE_BITMASK      0x0F
+
+#define XLNX_USB_PME_ENABLE             0x0034
+#define XLNX_PME_ENABLE_SIG_GEN         0x01
+
+#define XLNX_USB_REQ_PWR_STATE          0x003c
+#define XLNX_REQ_PWR_STATE_D0           0x00
+#define XLNX_REQ_PWR_STATE_D3           0x03
+
+/* Number of retries for USB operations */
+#define DWC3_PWR_STATE_RETRIES          1000
+#define DWC3_PWR_TIMEOUT		100
+
 #define DWC3_OF_ADDRESS(ADDR)		((ADDR) - DWC3_GLOBALS_REGS_START)
 
 struct dwc3_of_simple {
@@ -54,32 +70,12 @@ struct dwc3_of_simple {
 	int			num_clocks;
 	void __iomem		*regs;
 	struct dwc3		*dwc;
+	struct phy		*phy;
 	bool			wakeup_capable;
 	bool			dis_u3_susphy_quirk;
+	bool			enable_d3_suspend;
+	char			soc_rev;
 };
-
-void dwc3_set_phydata(struct device *dev, struct phy *phy)
-{
-	struct device_node *node = of_get_parent(dev->of_node);
-	int ret;
-
-	if ((node != NULL) &&
-		of_device_is_compatible(node, "xlnx,zynqmp-dwc3")) {
-		struct platform_device *pdev_parent;
-		struct dwc3_of_simple   *simple;
-
-		pdev_parent = of_find_device_by_node(node);
-		simple = platform_get_drvdata(pdev_parent);
-
-		/* assign USB vendor regs to phy lane */
-		ret = xpsgtr_set_protregs(phy, simple->regs);
-		if (ret) {
-			dev_err(&pdev_parent->dev,
-				"Not able to set PHY data\n");
-		}
-	}
-}
-EXPORT_SYMBOL(dwc3_set_phydata);
 
 int dwc3_enable_hw_coherency(struct device *dev)
 {
@@ -106,10 +102,9 @@ EXPORT_SYMBOL(dwc3_enable_hw_coherency);
 
 void dwc3_set_simple_data(struct dwc3 *dwc)
 {
-	struct device_node *node =
-		of_find_compatible_node(NULL, NULL, "xlnx,zynqmp-dwc3");
+	struct device_node *node = of_get_parent(dwc->dev->of_node);
 
-	if (node) {
+	if (node && of_device_is_compatible(node, "xlnx,zynqmp-dwc3")) {
 		struct platform_device *pdev_parent;
 		struct dwc3_of_simple   *simple;
 
@@ -124,10 +119,9 @@ EXPORT_SYMBOL(dwc3_set_simple_data);
 
 void dwc3_simple_check_quirks(struct dwc3 *dwc)
 {
-	struct device_node *node =
-		of_find_compatible_node(NULL, NULL, "xlnx,zynqmp-dwc3");
+	struct device_node *node = of_get_parent(dwc->dev->of_node);
 
-	if (node)  {
+	if (node && of_device_is_compatible(node, "xlnx,zynqmp-dwc3")) {
 		struct platform_device *pdev_parent;
 		struct dwc3_of_simple   *simple;
 
@@ -142,8 +136,15 @@ EXPORT_SYMBOL(dwc3_simple_check_quirks);
 
 void dwc3_simple_wakeup_capable(struct device *dev, bool wakeup)
 {
-	struct device_node *node =
-		of_find_compatible_node(NULL, NULL, "xlnx,zynqmp-dwc3");
+	struct device_node *node = of_node_get(dev->parent->of_node);
+
+	/* check for valid parent node */
+	while (node) {
+		if (!of_device_is_compatible(node, "xlnx,zynqmp-dwc3"))
+			node = of_get_next_parent(node);
+		else
+			break;
+	}
 
 	if (node)  {
 		struct platform_device *pdev_parent;
@@ -154,9 +155,42 @@ void dwc3_simple_wakeup_capable(struct device *dev, bool wakeup)
 
 		/* Set wakeup capable as true or false */
 		simple->wakeup_capable = wakeup;
+
+		/* Allow D3 state if wakeup capable only */
+		simple->enable_d3_suspend = wakeup;
 	}
 }
 EXPORT_SYMBOL(dwc3_simple_wakeup_capable);
+
+static int dwc3_simple_set_phydata(struct dwc3_of_simple *simple)
+{
+	struct device		*dev = simple->dev;
+	struct device_node	*np = dev->of_node;
+	struct phy		*phy;
+
+	np = of_get_next_child(np, NULL);
+
+	if (np) {
+		phy = of_phy_get(np, "usb3-phy");
+		if (IS_ERR(phy)) {
+			dev_err(dev, "%s: Can't find usb3-phy\n", __func__);
+			return PTR_ERR(phy);
+		}
+
+		/* Store phy for future usage */
+		simple->phy = phy;
+
+		/* assign USB vendor regs addr to phy platform_data */
+		phy->dev.platform_data = simple->regs;
+
+		phy_put(phy);
+	} else {
+		dev_err(dev, "%s: Can't find child node\n", __func__);
+		return -EINVAL;
+	}
+
+	return 0;
+}
 
 static int dwc3_of_simple_clk_init(struct dwc3_of_simple *simple, int count)
 {
@@ -251,12 +285,20 @@ static int dwc3_of_simple_probe(struct platform_device *pdev)
 			simple->dis_u3_susphy_quirk = true;
 		}
 
+		/* Update soc_rev to simple for future use */
+		simple->soc_rev = *soc_rev;
+
 		/* Clean soc_rev if got a valid pointer from nvmem driver
 		 * else we may end up in kernel panic
 		 */
 		if (!IS_ERR(soc_rev))
 			kfree(soc_rev);
 	}
+
+	/* Set phy data for future use */
+	ret = dwc3_simple_set_phydata(simple);
+	if (ret)
+		return ret;
 
 	ret = dwc3_of_simple_clk_init(simple, of_clk_get_parent_count(np));
 	if (ret)
@@ -320,6 +362,85 @@ static void dwc3_simple_vbus(struct dwc3 *dwc, bool vbus_off)
 	addr = DWC3_OF_ADDRESS(DWC3_GUSB2PHYACC(0));
 	writel(reg, dwc->regs + addr);
 }
+
+int dwc3_set_usb_core_power(struct dwc3 *dwc, bool on)
+{
+	u32 reg, retries;
+	void __iomem *reg_base;
+	struct platform_device *pdev_parent;
+	struct dwc3_of_simple *simple;
+	struct device_node *node = of_get_parent(dwc->dev->of_node);
+
+	/* this is for Xilinx devices only */
+	if (!of_device_is_compatible(node, "xlnx,zynqmp-dwc3"))
+		return 0;
+
+	pdev_parent = of_find_device_by_node(node);
+	simple = platform_get_drvdata(pdev_parent);
+	reg_base = simple->regs;
+
+	/* Check if entering into D3 state is allowed during suspend */
+	if ((simple->soc_rev < ZYNQMP_SILICON_V4) || !simple->enable_d3_suspend)
+		return 0;
+
+	if (on) {
+		dev_dbg(dwc->dev, "trying to set power state to D0....\n");
+
+		/* Release USB core reset , which was assert during D3 entry */
+		xpsgtr_usb_crst_release(simple->phy);
+
+		/* change power state to D0 */
+		writel(XLNX_REQ_PWR_STATE_D0,
+		       reg_base + XLNX_USB_REQ_PWR_STATE);
+
+		/* wait till current state is changed to D0 */
+		retries = DWC3_PWR_STATE_RETRIES;
+		do {
+			reg = readl(reg_base + XLNX_USB_CUR_PWR_STATE);
+			if ((reg & XLNX_CUR_PWR_STATE_BITMASK) ==
+			     XLNX_CUR_PWR_STATE_D0)
+				break;
+
+			usleep_range(DWC3_PWR_TIMEOUT, DWC3_PWR_TIMEOUT * 2);
+		} while (--retries);
+
+		if (!retries) {
+			dev_err(dwc->dev, "Failed to set power state to D0\n");
+			return -EIO;
+		}
+	} else {
+		dev_dbg(dwc->dev, "Trying to set power state to D3...\n");
+
+		/* enable PME to wakeup from hibernation */
+		writel(XLNX_PME_ENABLE_SIG_GEN, reg_base + XLNX_USB_PME_ENABLE);
+
+		/* change power state to D3 */
+		writel(XLNX_REQ_PWR_STATE_D3,
+		       reg_base + XLNX_USB_REQ_PWR_STATE);
+
+		/* wait till current state is changed to D3 */
+		retries = DWC3_PWR_STATE_RETRIES;
+		do {
+			reg = readl(reg_base + XLNX_USB_CUR_PWR_STATE);
+			if ((reg & XLNX_CUR_PWR_STATE_BITMASK) ==
+					XLNX_CUR_PWR_STATE_D3)
+				break;
+
+			usleep_range(DWC3_PWR_TIMEOUT, DWC3_PWR_TIMEOUT * 2);
+		} while (--retries);
+
+		if (!retries) {
+			dev_err(dwc->dev, "Failed to set power state to D3\n");
+			return -EIO;
+		}
+
+		/* Assert USB core reset after entering D3 state */
+		xpsgtr_usb_crst_assert(simple->phy);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(dwc3_set_usb_core_power);
 
 static int dwc3_of_simple_suspend(struct device *dev)
 {

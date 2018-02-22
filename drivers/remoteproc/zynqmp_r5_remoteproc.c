@@ -70,7 +70,7 @@
 
 /* RPU IPI mask */
 #define RPU_IPI_INIT_MASK	0x00000100
-#define RPU_IPI_MASK(n)		(RPU_IPI_INIT_MASK << n)
+#define RPU_IPI_MASK(n)		(RPU_IPI_INIT_MASK << (n))
 #define RPU_0_IPI_MASK		RPU_IPI_MASK(0)
 #define RPU_1_IPI_MASK		RPU_IPI_MASK(1)
 
@@ -349,7 +349,7 @@ static int zynqmp_r5_rproc_start(struct rproc *rproc)
 				  ZYNQMP_PM_REQUEST_ACK_BLOCKING);
 	r5_boot_addr_config(local);
 	/* Add delay before release from halt and reset */
-	udelay(500);
+	usleep_range(400, 500);
 	zynqmp_pm_request_wakeup(local->rpu_pd_id,
 				 1, local->bootmem,
 		ZYNQMP_PM_REQUEST_ACK_NO);
@@ -689,7 +689,8 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 				INIT_LIST_HEAD(&mem_node->pd_ids);
 				for (j = 0; ; j++) {
 					pd_node = of_parse_phandle(tmp_node,
-								   "pd-handle", j);
+								   "pd-handle",
+								   j);
 					if (!pd_node)
 						break;
 					pd_id = devm_kzalloc(&pdev->dev,
@@ -700,7 +701,8 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 						goto rproc_fault;
 					}
 					of_property_read_u32(pd_node,
-							     "pd-id", &pd_id->id);
+							     "pd-id",
+							     &pd_id->id);
 					list_add_tail(&pd_id->node,
 						      &mem_node->pd_ids);
 					dev_dbg(&pdev->dev,
@@ -712,6 +714,13 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 		} else {
 			break;
 		}
+	}
+	if (!i) {
+		/* No srams specified */
+		dev_err(&pdev->dev,
+			"no 'srams' firmware mmio-sram memories specified in DTB.");
+		ret = -EINVAL;
+		goto rproc_fault;
 	}
 
 	/* Disable IPI before requesting IPI IRQ */

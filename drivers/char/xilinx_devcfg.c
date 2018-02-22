@@ -182,13 +182,6 @@ static void xdevcfg_reset_pl(void __iomem *base_address)
 	 * the rising edge happens.
 	 */
 	xdevcfg_writereg(base_address + XDCFG_CTRL_OFFSET,
-			(xdevcfg_readreg(base_address + XDCFG_CTRL_OFFSET) |
-			 XDCFG_CTRL_PCFG_PROG_B_MASK));
-	while (!(xdevcfg_readreg(base_address + XDCFG_STATUS_OFFSET) &
-				XDCFG_STATUS_PCFG_INIT_MASK))
-		;
-
-	xdevcfg_writereg(base_address + XDCFG_CTRL_OFFSET,
 			(xdevcfg_readreg(base_address + XDCFG_CTRL_OFFSET) &
 			 ~XDCFG_CTRL_PCFG_PROG_B_MASK));
 	while (xdevcfg_readreg(base_address + XDCFG_STATUS_OFFSET) &
@@ -356,14 +349,14 @@ xdevcfg_write(struct file *file, const char __user *buf, size_t count,
 
 	timeout = jiffies + msecs_to_jiffies(1000);
 
-	while (!drvdata->dma_done) {
+	while (!READ_ONCE(drvdata->dma_done)) {
 		if (time_after(jiffies, timeout)) {
 			status = -ETIMEDOUT;
 			goto error;
 		}
 	}
 
-	if (drvdata->error_status)
+	if (READ_ONCE(drvdata->error_status))
 		status = drvdata->error_status;
 
 	/* Disable the DMA and error interrupts */

@@ -573,9 +573,16 @@ enum XAE_QUEUE {
 #define XAE_MAX_QUEUES   1
 #endif
 
-#ifdef CONFIG_XILINX_TSN_PTP
-#define SIOCCHIOCTL SIOCDEVPRIVATE
-#endif
+enum axienet_tsn_ioctl {
+	SIOCCHIOCTL = SIOCDEVPRIVATE,
+	SIOC_PREEMPTION_CFG,
+	SIOC_PREEMPTION_CTRL,
+	SIOC_PREEMPTION_STS,
+	SIOC_PREEMPTION_COUNTER,
+	SIOC_QBU_USER_OVERRIDE,
+	SIOC_QBU_STS,
+};
+
 /**
  * struct axienet_local - axienet private per device data
  * @ndev:	Pointer for net_device to which it will be attached.
@@ -916,6 +923,17 @@ void axienet_tx_tstamp(struct work_struct *work);
 int axienet_qbv_init(struct net_device *ndev);
 void axienet_qbv_remove(struct net_device *ndev);
 int axienet_set_schedule(struct net_device *ndev, void __user *useraddr);
+#endif
+
+#ifdef CONFIG_XILINX_TSN_QBR
+int axienet_preemption(struct net_device *ndev, void __user *useraddr);
+int axienet_preemption_ctrl(struct net_device *ndev, void __user *useraddr);
+int axienet_preemption_sts(struct net_device *ndev, void __user *useraddr);
+int axienet_preemption_cnt(struct net_device *ndev, void __user *useraddr);
+#ifdef CONFIG_XILINX_TSN_QBV
+int axienet_qbu_user_override(struct net_device *ndev, void __user *useraddr);
+int axienet_qbu_sts(struct net_device *ndev, void __user *useraddr);
+#endif
 #endif
 
 #endif /* XILINX_AXI_ENET_H */

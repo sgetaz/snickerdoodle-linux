@@ -154,8 +154,6 @@
 #define PROT_BUS_WIDTH_20		0x1
 #define PROT_BUS_WIDTH_40		0x2
 
-#define TX_TERM_FIX_VAL			0x11
-
 #define LANE_CLK_SHARE_MASK		0x8F
 
 #define SATA_CONTROL_OFFSET		0x0100
@@ -296,7 +294,6 @@ static struct xpsgtr_ssc ssc_lookup[] = {
  * @gtr_mutex: mutex for locking
  * @phys: pointer to all the lanes
  * @lpd: base address for low power domain devices reset control
- * @regs: address that phy needs to configure during configuring lane protocol
  * @tx_term_fix: fix for GT issue
  * @sata_rst: a reset control for SATA
  * @dp_rst: a reset control for DP
@@ -318,7 +315,6 @@ struct xpsgtr_dev {
 	struct mutex gtr_mutex;
 	struct xpsgtr_phy **phys;
 	void __iomem *lpd;
-	void __iomem *regs;
 	bool tx_term_fix;
 	struct reset_control *sata_rst;
 	struct reset_control *dp_rst;
@@ -333,26 +329,6 @@ struct xpsgtr_dev {
 	struct reset_control *gem2_rst;
 	struct reset_control *gem3_rst;
 };
-
-/**
- * xpsgtr_set_protregs - Called by the lane protocol to set phy related control
- *			 regs into gtr_dev, so that these address can be used
- *			 by phy while configuring lane.(Currently USB does this)
- *
- * @phy: pointer to lane
- * @regs:    pointer to protocol control register address
- *
- * Return: 0 on success
- */
-int xpsgtr_set_protregs(struct phy *phy, void __iomem *regs)
-{
-	struct xpsgtr_phy *gtr_phy = phy_get_drvdata(phy);
-	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
-
-	gtr_dev->regs = regs;
-	return 0;
-}
-EXPORT_SYMBOL_GPL(xpsgtr_set_protregs);
 
 int xpsgtr_override_deemph(struct phy *phy, u8 plvl, u8 vlvl)
 {
@@ -578,15 +554,22 @@ static int xpsgtr_configure_lane(struct xpsgtr_phy *gtr_phy)
 
 /**
  * xpsgtr_config_usbpipe - configures the PIPE3 signals for USB
- * @gtr_dev: pointer to gtr device
+ * @gtr_phy: pointer to gtr phy device
  */
-static void xpsgtr_config_usbpipe(struct xpsgtr_dev *gtr_dev)
+static void xpsgtr_config_usbpipe(struct xpsgtr_phy *gtr_phy)
 {
-	if (gtr_dev->regs != NULL) {
+	struct phy *phy = gtr_phy->phy;
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+	void __iomem *regs = dev_get_platdata(&phy->dev);
+
+	if (regs) {
 		/* Set PIPE power present signal */
-		writel(PIPE_POWER_ON, gtr_dev->regs + PIPE_POWER_OFFSET);
+		writel(PIPE_POWER_ON, regs + PIPE_POWER_OFFSET);
 		/* Clear PIPE CLK signal */
-		writel(PIPE_CLK_OFF, gtr_dev->regs + PIPE_CLK_OFFSET);
+		writel(PIPE_CLK_OFF, regs + PIPE_CLK_OFFSET);
+	} else {
+		dev_info(gtr_dev->dev,
+			 "%s: No valid Platform_data found\n", __func__);
 	}
 }
 
@@ -707,7 +690,7 @@ static int xpsgtr_controller_release_reset(struct xpsgtr_phy *gtr_phy)
 		xpsgtr_reset_release(gtr_dev->usb0_apbrst);
 
 		/* Config PIPE3 signals after releasing APB reset */
-		xpsgtr_config_usbpipe(gtr_dev);
+		xpsgtr_config_usbpipe(gtr_phy);
 
 		ret = xpsgtr_reset_release(gtr_dev->usb0_crst);
 		ret = xpsgtr_reset_release(gtr_dev->usb0_hibrst);
@@ -716,7 +699,7 @@ static int xpsgtr_controller_release_reset(struct xpsgtr_phy *gtr_phy)
 		xpsgtr_reset_release(gtr_dev->usb1_apbrst);
 
 		/* Config PIPE3 signals after releasing APB reset */
-		xpsgtr_config_usbpipe(gtr_dev);
+		xpsgtr_config_usbpipe(gtr_phy);
 
 		ret = xpsgtr_reset_release(gtr_dev->usb1_crst);
 		ret = xpsgtr_reset_release(gtr_dev->usb1_hibrst);
@@ -748,6 +731,62 @@ static int xpsgtr_controller_release_reset(struct xpsgtr_phy *gtr_phy)
 
 	return ret;
 }
+
+/**
+ * xpsgtr_usb_rst_assert - assert USB core reset
+ * @phy: pointer to phy
+ *
+ * Return: 0 on success or error on failure
+ */
+int xpsgtr_usb_crst_assert(struct phy *phy)
+{
+	struct xpsgtr_phy *gtr_phy = phy_get_drvdata(phy);
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+	int ret;
+
+	switch (gtr_phy->type) {
+	case XPSGTR_TYPE_USB0:
+		ret = xpsgtr_reset_assert(gtr_dev->usb0_crst);
+		break;
+	case XPSGTR_TYPE_USB1:
+		ret = xpsgtr_reset_assert(gtr_dev->usb1_crst);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(xpsgtr_usb_crst_assert);
+
+/**
+ * xpsgtr_usb_rst_release - release USB core reset
+ * @phy: pointer to phy
+ *
+ * Return: 0 on success or error on failure
+ */
+int xpsgtr_usb_crst_release(struct phy *phy)
+{
+	struct xpsgtr_phy *gtr_phy = phy_get_drvdata(phy);
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+	int ret;
+
+	switch (gtr_phy->type) {
+	case XPSGTR_TYPE_USB0:
+		ret = xpsgtr_reset_release(gtr_dev->usb0_crst);
+		break;
+	case XPSGTR_TYPE_USB1:
+		ret = xpsgtr_reset_release(gtr_dev->usb1_crst);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(xpsgtr_usb_crst_release);
 
 int xpsgtr_wait_pll_lock(struct phy *phy)
 {
@@ -1008,7 +1047,7 @@ static int xpsgtr_phy_init(struct phy *phy)
 		 * we need to configure any lane ICM_CFG to valid protocol. This
 		 * will deassert the CMN_Resetn signal.
 		 */
-		writel(TX_TERM_FIX_VAL, gtr_dev->serdes + ICM_CFG1);
+		xpsgtr_lane_setprotocol(gtr_phy);
 
 		/* Clear Test Mode reset */
 		reg = readl(gtr_dev->serdes + TM_CMN_RST);

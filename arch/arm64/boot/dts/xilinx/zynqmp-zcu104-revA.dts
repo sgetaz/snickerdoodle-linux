@@ -5,10 +5,7 @@
  *
  * Michal Simek <michal.simek@xilinx.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
+ * SPDX-License-Identifier:	GPL-2.0+
  */
 
 /dts-v1/;
@@ -431,9 +428,11 @@
 /* SD1 with level shifter */
 &sdhci1 {
 	status = "okay";
+	no-1-8-v;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_sdhci1_default>;
 	xlnx,mio_bank = <1>;
+	disable-wp;
 };
 
 &serdes {

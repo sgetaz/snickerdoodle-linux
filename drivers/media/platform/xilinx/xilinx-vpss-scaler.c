@@ -802,7 +802,7 @@ xv_hscaler_calculate_phases(struct xscaler_device *xscaler,
 			}
 
 			/* Needs updates for 4 PPC */
-			xscaler->H_phases[x] = (phaseH <<
+			xscaler->H_phases[x] |= (phaseH <<
 						(s * XHSC_HPHASE_MULTIPLIER));
 			xscaler->H_phases[x] |= (array_idx <<
 						(XHSC_HPHASE_SHIFT_BY_6 +
@@ -1206,10 +1206,6 @@ static int xv_hscaler_setup_video_fmt(struct xscaler_device *xscaler,
 	u32 video_out;
 
 	switch (vsc_out) {
-	case XVIDC_CSF_YCRCB_420:
-		dev_dbg(xscaler->xvip.dev,
-			"Hscaler Input Media Format is YUV 420");
-		break;
 	case XVIDC_CSF_YCRCB_422:
 		dev_dbg(xscaler->xvip.dev,
 			"Hscaler Input Media Format is YUV 422");
@@ -1250,7 +1246,7 @@ static int xv_hscaler_setup_video_fmt(struct xscaler_device *xscaler,
 		break;
 	case MEDIA_BUS_FMT_RBG888_1X24:
 		dev_dbg(xscaler->xvip.dev,
-			"Hscaler Output Media Format YUV 444\n");
+			"Hscaler Output Media Format RGB\n");
 		video_out = XVIDC_CSF_RGB;
 		break;
 	default:

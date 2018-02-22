@@ -557,6 +557,9 @@ static int spi_nor_erase(struct mtd_info *mtd, struct erase_info *instr)
 			ret = spi_nor_wait_till_ready(nor);
 			if (ret)
 				goto erase_err;
+
+			write_enable(nor);
+
 			ret = spi_nor_erase_sector(nor, offset);
 			if (ret)
 				goto erase_err;
@@ -1183,7 +1186,8 @@ static const struct flash_info spi_nor_ids[] = {
 	{ "640s33b",  INFO(0x898913, 0, 64 * 1024, 128, 0) },
 
 	/* ISSI */
-	{ "is25lp256d", INFO(0x9d6019, 0, 64 * 1024, 512, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ | USE_FSR | SPI_NOR_HAS_LOCK) },
+	{ "is25lp256d", INFO(0x9d6019, 0, 64 * 1024, 512, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ | SPI_NOR_HAS_LOCK) },
+	{ "is25wp256d", INFO(0x9d7019, 0, 64 * 1024, 512, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ | SPI_NOR_HAS_LOCK) },
 	{ "is25cd512", INFO(0x7f9d20, 0, 32 * 1024,   2, SECT_4K) },
 	{ "is25wp128", INFO(0x9d7018, 0, 64 * 1024, 256, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
 
@@ -1591,15 +1595,21 @@ static int spi_nor_write(struct mtd_info *mtd, loff_t to, size_t len,
 		if (nor->addr_width == 4)
 			rem_bank_len = (mtd->size >> stack_shift) - offset;
 		if (nor->addr_width == 3)
-			write_ear(nor, (offset >> nor->shift));
-		if (len < rem_bank_len) {
+			write_ear(nor, offset);
+		if (nor->isstacked == 1) {
+			if (len <= rem_bank_len) {
+				page_remain = min_t(size_t,
+					 nor->page_size - page_offset, len - i);
+			} else {
+				/*
+				 * the size of data remaining
+				 * on the first page
+				 */
+				page_remain = rem_bank_len;
+			}
+		} else {
 			page_remain = min_t(size_t,
-				    nor->page_size - page_offset, len - i);
-
-		}
-		else {
-		/* the size of data remaining on the first page */
-			page_remain = rem_bank_len;
+					 nor->page_size - page_offset, len - i);
 		}
 		ret = spi_nor_wait_till_ready(nor);
 		if (ret)
@@ -2063,6 +2073,14 @@ static const struct flash_info *spi_nor_match_id(const char *name)
 	}
 	return NULL;
 }
+
+void spi_nor_shutdown(struct spi_nor *nor)
+{
+	if (nor->addr_width == 3 &&
+		(nor->mtd.size >> nor->shift) > 0x1000000)
+		write_ear(nor, 0);
+}
+EXPORT_SYMBOL_GPL(spi_nor_shutdown);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Huang Shijie <shijie8@gmail.com>");

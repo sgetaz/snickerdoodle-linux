@@ -430,7 +430,7 @@ struct xilinx_dpdma_debugfs_request dpdma_debugfs_reqs[] = {
 static ssize_t xilinx_dpdma_debugfs_write(struct file *f, const char __user
 					       *buf, size_t size, loff_t *pos)
 {
-	char *kern_buff;
+	char *kern_buff, *kern_buff_start;
 	char *dpdma_test_req;
 	int ret;
 	int i;
@@ -445,10 +445,11 @@ static ssize_t xilinx_dpdma_debugfs_write(struct file *f, const char __user
 	kern_buff = kzalloc(size, GFP_KERNEL);
 	if (!kern_buff)
 		return -ENOMEM;
+	kern_buff_start = kern_buff;
 
 	ret = strncpy_from_user(kern_buff, buf, size);
 	if (ret < 0) {
-		kfree(kern_buff);
+		kfree(kern_buff_start);
 		return ret;
 	}
 
@@ -458,13 +459,13 @@ static ssize_t xilinx_dpdma_debugfs_write(struct file *f, const char __user
 	for (i = 0; i < ARRAY_SIZE(dpdma_debugfs_reqs); i++) {
 		if (!strcasecmp(dpdma_test_req, dpdma_debugfs_reqs[i].req)) {
 			if (!dpdma_debugfs_reqs[i].write_handler(&kern_buff)) {
-				kfree(kern_buff);
+				kfree(kern_buff_start);
 				return size;
 			}
 			break;
 		}
 	}
-	kfree(kern_buff);
+	kfree(kern_buff_start);
 	return -EINVAL;
 }
 
@@ -649,8 +650,8 @@ static inline void
 xilinx_dpdma_sw_desc_next_64(struct xilinx_dpdma_sw_desc *sw_desc,
 			     struct xilinx_dpdma_sw_desc *next)
 {
-	sw_desc->hw.next_desc = (u32)next->phys;
-	sw_desc->hw.addr_ext |= ((u64)next->phys >> 32) &
+	sw_desc->hw.next_desc = lower_32_bits(next->phys);
+	sw_desc->hw.addr_ext |= upper_32_bits(next->phys) &
 				XILINX_DPDMA_DESC_ADDR_EXT_ADDR_MASK;
 }
 
@@ -670,10 +671,13 @@ static void xilinx_dpdma_sw_desc_addr_64(struct xilinx_dpdma_sw_desc *sw_desc,
 {
 	struct xilinx_dpdma_hw_desc *hw_desc = &sw_desc->hw;
 	unsigned int i;
+	u32 src_addr_extn;
 
-	hw_desc->src_addr = (u32)dma_addr[0];
-	hw_desc->addr_ext |=
-		((u64)dma_addr[0] >> 32) & XILINX_DPDMA_DESC_ADDR_EXT_ADDR_MASK;
+	hw_desc->src_addr = lower_32_bits(dma_addr[0]);
+	src_addr_extn = upper_32_bits(dma_addr[0]) &
+			XILINX_DPDMA_DESC_ADDR_EXT_ADDR_MASK;
+	hw_desc->addr_ext |= (src_addr_extn <<
+			      XILINX_DPDMA_DESC_ADDR_EXT_ADDR_SHIFT);
 
 	if (prev)
 		xilinx_dpdma_sw_desc_next_64(prev, sw_desc);

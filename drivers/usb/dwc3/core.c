@@ -627,8 +627,6 @@ static int dwc3_phy_setup(struct dwc3 *dwc)
 
 static void dwc3_core_exit(struct dwc3 *dwc)
 {
-	dwc3_event_buffers_cleanup(dwc);
-
 	usb_phy_shutdown(dwc->usb2_phy);
 	usb_phy_shutdown(dwc->usb3_phy);
 	phy_exit(dwc->usb2_generic_phy);
@@ -924,8 +922,6 @@ static int dwc3_core_get_phy(struct dwc3 *dwc)
 			dev_err(dev, "no usb2 phy configured\n");
 			return ret;
 		}
-	} else {
-		dwc3_set_phydata(dev, dwc->usb2_generic_phy);
 	}
 
 	dwc->usb3_generic_phy = devm_phy_get(dev, "usb3-phy");
@@ -939,8 +935,6 @@ static int dwc3_core_get_phy(struct dwc3 *dwc)
 			dev_err(dev, "no usb3 phy configured\n");
 			return ret;
 		}
-	} else {
-		dwc3_set_phydata(dev, dwc->usb3_generic_phy);
 	}
 
 	return 0;
@@ -1275,6 +1269,7 @@ static int dwc3_remove(struct platform_device *pdev)
 	dwc3_debugfs_exit(dwc);
 	dwc3_core_exit_mode(dwc);
 
+	dwc3_event_buffers_cleanup(dwc);
 	dwc3_core_exit(dwc);
 	dwc3_ulpi_exit(dwc);
 
@@ -1306,6 +1301,11 @@ static int dwc3_suspend_common(struct dwc3 *dwc)
 		break;
 	}
 
+	dwc3_event_buffers_cleanup(dwc);
+
+	/* Put the core into D3 state */
+	dwc3_set_usb_core_power(dwc, false);
+
 	dwc3_core_exit(dwc);
 
 	return 0;
@@ -1315,6 +1315,9 @@ static int dwc3_resume_common(struct dwc3 *dwc)
 {
 	unsigned long	flags;
 	int		ret;
+
+	/* Bring core to D0 state */
+	dwc3_set_usb_core_power(dwc, true);
 
 	ret = dwc3_core_init(dwc);
 	if (ret)

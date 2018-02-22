@@ -233,8 +233,8 @@ static int xilinx_drm_fbdev_create(struct drm_fb_helper *fb_helper,
 	int ret;
 
 	DRM_DEBUG_KMS("surface width(%d), height(%d) and bpp(%d)\n",
-			sizes->surface_width, sizes->surface_height,
-			sizes->surface_bpp);
+		      sizes->surface_width, sizes->surface_height,
+		      sizes->surface_bpp);
 
 	bytes_per_pixel = DIV_ROUND_UP(sizes->surface_bpp, 8);
 
@@ -321,7 +321,7 @@ static struct drm_fb_helper_funcs xilinx_drm_fb_helper_funcs = {
  * Return: a newly allocated drm_fb_helper struct or a ERR_PTR.
  */
 struct drm_fb_helper *
-xilinx_drm_fb_init(struct drm_device *drm, unsigned int preferred_bpp,
+xilinx_drm_fb_init(struct drm_device *drm, int preferred_bpp,
 		   unsigned int num_crtc, unsigned int max_conn_count,
 		   unsigned int align, unsigned int vres_mult)
 {
@@ -351,7 +351,6 @@ xilinx_drm_fb_init(struct drm_device *drm, unsigned int preferred_bpp,
 	if (ret < 0) {
 		DRM_ERROR("Failed to add connectors.\n");
 		goto err_drm_fb_helper_fini;
-
 	}
 
 	drm_helper_disable_unused_functions(drm);
@@ -380,8 +379,12 @@ err_free:
  */
 void xilinx_drm_fb_fini(struct drm_fb_helper *fb_helper)
 {
-	struct xilinx_drm_fbdev *fbdev = to_fbdev(fb_helper);
+	struct xilinx_drm_fbdev *fbdev;
 
+	if (!fb_helper)
+		return;
+
+	fbdev = to_fbdev(fb_helper);
 	if (fbdev->fb_helper.fbdev) {
 		struct fb_info *info;
 		int ret;
@@ -492,7 +495,6 @@ err_gem_object_unreference:
 		drm_gem_object_unreference_unlocked(&objs[i]->base);
 	return ERR_PTR(ret);
 }
-
 
 /**
  * xilinx_drm_fb_hotplug_event - Poll for hotpulug events

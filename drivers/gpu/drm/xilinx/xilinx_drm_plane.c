@@ -81,7 +81,7 @@ struct xilinx_drm_plane {
 	unsigned int alpha;
 	unsigned int alpha_enable;
 	bool primary;
-	uint32_t format;
+	u32 format;
 	struct xilinx_drm_plane_dma dma[MAX_NUM_SUB_PLANES];
 	struct xilinx_rgb2yuv *rgb2yuv;
 	struct xilinx_cresample *cresample;
@@ -114,7 +114,7 @@ struct xilinx_drm_plane_manager {
 	struct xilinx_osd *osd;
 	struct xilinx_drm_dp_sub *dp_sub;
 	int num_planes;
-	uint32_t format;
+	u32 format;
 	int max_width;
 	struct drm_property *zpos_prop;
 	struct drm_property *alpha_prop;
@@ -176,7 +176,7 @@ void xilinx_drm_plane_dpms(struct drm_plane *base_plane, int dpms)
 		if (manager->dp_sub) {
 			if (plane->primary) {
 				xilinx_drm_dp_sub_enable_alpha(manager->dp_sub,
-						plane->alpha_enable);
+							       plane->alpha_enable);
 				xilinx_drm_dp_sub_set_alpha(manager->dp_sub,
 							    plane->alpha);
 			}
@@ -197,7 +197,7 @@ void xilinx_drm_plane_dpms(struct drm_plane *base_plane, int dpms)
 			xilinx_osd_layer_set_priority(plane->osd_layer,
 						      plane->prio);
 			xilinx_osd_layer_enable_alpha(plane->osd_layer,
-						   plane->alpha_enable);
+						      plane->alpha_enable);
 			xilinx_osd_layer_set_alpha(plane->osd_layer,
 						   plane->alpha);
 			xilinx_osd_layer_enable(plane->osd_layer);
@@ -248,8 +248,8 @@ int xilinx_drm_plane_mode_set(struct drm_plane *base_plane,
 			      struct drm_framebuffer *fb,
 			      int crtc_x, int crtc_y,
 			      unsigned int crtc_w, unsigned int crtc_h,
-			      uint32_t src_x, uint32_t src_y,
-			      uint32_t src_w, uint32_t src_h)
+			      u32 src_x, u32 src_y,
+			      u32 src_w, u32 src_h)
 {
 	struct xilinx_drm_plane *plane = to_xilinx_plane(base_plane);
 	struct drm_gem_cma_object *obj;
@@ -267,7 +267,7 @@ int xilinx_drm_plane_mode_set(struct drm_plane *base_plane,
 		xilinx_rgb2yuv_configure(plane->rgb2yuv, crtc_w, crtc_h);
 
 	DRM_DEBUG_KMS("h: %d(%d), v: %d(%d)\n",
-			src_w, crtc_x, src_h, crtc_y);
+		      src_w, crtc_x, src_h, crtc_y);
 	DRM_DEBUG_KMS("bpp: %d\n", fb->bits_per_pixel / 8);
 
 	hsub = drm_format_horz_chroma_subsampling(fb->pixel_format);
@@ -341,9 +341,10 @@ static int xilinx_drm_plane_update(struct drm_plane *base_plane,
 				   struct drm_framebuffer *fb,
 				   int crtc_x, int crtc_y,
 				   unsigned int crtc_w, unsigned int crtc_h,
-				   uint32_t src_x, uint32_t src_y,
-				   uint32_t src_w, uint32_t src_h)
+				   u32 src_x, u32 src_y,
+				   u32 src_w, u32 src_h)
 {
+	struct xilinx_drm_plane *plane = to_xilinx_plane(base_plane);
 	int ret;
 
 	ret = xilinx_drm_plane_mode_set(base_plane, fb,
@@ -356,8 +357,10 @@ static int xilinx_drm_plane_update(struct drm_plane *base_plane,
 	}
 
 	/* make sure a plane is on */
-	xilinx_drm_plane_dpms(base_plane, DRM_MODE_DPMS_ON);
-	xilinx_drm_plane_commit(base_plane);
+	if (plane->dpms != DRM_MODE_DPMS_ON)
+		xilinx_drm_plane_dpms(base_plane, DRM_MODE_DPMS_ON);
+	else
+		xilinx_drm_plane_commit(base_plane);
 
 	return 0;
 }
@@ -450,9 +453,6 @@ static void xilinx_drm_plane_set_zpos(struct drm_plane *base_plane,
 	bool update = false;
 	int i;
 
-	if (plane->zpos == zpos)
-		return;
-
 	for (i = 0; i < manager->num_planes; i++) {
 		if (manager->planes[i] != plane &&
 		    manager->planes[i]->prio == zpos) {
@@ -477,9 +477,6 @@ static void xilinx_drm_plane_set_alpha(struct drm_plane *base_plane,
 	struct xilinx_drm_plane *plane = to_xilinx_plane(base_plane);
 	struct xilinx_drm_plane_manager *manager = plane->manager;
 
-	if (plane->alpha == alpha)
-		return;
-
 	plane->alpha = alpha;
 
 	if (plane->osd_layer)
@@ -493,9 +490,6 @@ static void xilinx_drm_plane_enable_alpha(struct drm_plane *base_plane,
 {
 	struct xilinx_drm_plane *plane = to_xilinx_plane(base_plane);
 	struct xilinx_drm_plane_manager *manager = plane->manager;
-
-	if (plane->alpha_enable == enable)
-		return;
 
 	plane->alpha_enable = enable;
 
@@ -544,7 +538,7 @@ int xilinx_drm_plane_get_max_width(struct drm_plane *base_plane)
 
 /* check if format is supported */
 bool xilinx_drm_plane_check_format(struct xilinx_drm_plane_manager *manager,
-				   uint32_t format)
+				   u32 format)
 {
 	int i;
 
@@ -584,7 +578,8 @@ void xilinx_drm_plane_restore(struct xilinx_drm_plane_manager *manager)
 	for (i = 0; i < manager->num_planes; i++) {
 		plane = manager->planes[i];
 
-		plane->prio = plane->zpos = plane->id;
+		plane->prio = plane->id;
+		plane->zpos = plane->id;
 		if (manager->zpos_prop)
 			drm_object_property_set_value(&plane->base.base,
 						      manager->zpos_prop,
@@ -599,12 +594,12 @@ void xilinx_drm_plane_restore(struct xilinx_drm_plane_manager *manager)
 		plane->alpha_enable = true;
 		if (manager->alpha_enable_prop)
 			drm_object_property_set_value(&plane->base.base,
-					manager->alpha_enable_prop, true);
+						      manager->alpha_enable_prop, true);
 	}
 }
 
 /* get the plane format */
-uint32_t xilinx_drm_plane_get_format(struct drm_plane *base_plane)
+u32 xilinx_drm_plane_get_format(struct drm_plane *base_plane)
 {
 	struct xilinx_drm_plane *plane = to_xilinx_plane(base_plane);
 
@@ -715,7 +710,7 @@ void xilinx_drm_plane_manager_dpms(struct xilinx_drm_plane_manager *manager,
  * called from the CRTC driver before calling the xilinx_drm_plane_mode_set().
  */
 void xilinx_drm_plane_manager_mode_set(struct xilinx_drm_plane_manager *manager,
-				      unsigned int crtc_w, unsigned int crtc_h)
+				       unsigned int crtc_w, unsigned int crtc_h)
 {
 	if (manager->osd)
 		xilinx_osd_set_dimension(manager->osd, crtc_w, crtc_h);
@@ -734,12 +729,12 @@ xilinx_drm_plane_create(struct xilinx_drm_plane_manager *manager,
 	struct property *prop;
 	const char *dma_name;
 	enum drm_plane_type type;
-	uint32_t fmt_in = -1;
-	uint32_t fmt_out = -1;
+	u32 fmt_in = 0;
+	u32 fmt_out = 0;
 	const char *fmt;
 	int i;
 	int ret;
-	uint32_t *fmts = NULL;
+	u32 *fmts = NULL;
 	unsigned int num_fmts = 0;
 
 	for (i = 0; i < manager->num_planes; i++)
@@ -770,7 +765,7 @@ xilinx_drm_plane_create(struct xilinx_drm_plane_manager *manager,
 	plane->zpos = i;
 	plane->alpha = manager->default_alpha;
 	plane->dpms = DRM_MODE_DPMS_OFF;
-	plane->format = -1;
+	plane->format = 0;
 	DRM_DEBUG_KMS("plane->id: %d\n", plane->id);
 
 	i = 0;
@@ -836,13 +831,13 @@ xilinx_drm_plane_create(struct xilinx_drm_plane_manager *manager,
 			goto err_dma;
 
 		/* format sanity check */
-		if ((fmt_out != -1) && (fmt_out != fmt_in)) {
+		if ((fmt_out != 0) && (fmt_out != fmt_in)) {
 			DRM_ERROR("input/output format mismatch\n");
 			ret = -EINVAL;
 			goto err_dma;
 		}
 
-		if (plane->format == -1)
+		if (plane->format == 0)
 			plane->format = fmt_in;
 
 		/* cresample output format */
@@ -855,7 +850,7 @@ xilinx_drm_plane_create(struct xilinx_drm_plane_manager *manager,
 	/* create an OSD layer when OSD is available */
 	if (manager->osd) {
 		/* format sanity check */
-		if ((fmt_out != -1) && (fmt_out != manager->format)) {
+		if ((fmt_out != 0) && (fmt_out != manager->format)) {
 			DRM_ERROR("input/output format mismatch\n");
 			ret = -EINVAL;
 			goto err_dma;
@@ -870,7 +865,7 @@ xilinx_drm_plane_create(struct xilinx_drm_plane_manager *manager,
 			goto err_dma;
 		}
 
-		if (plane->format == -1)
+		if (plane->format == 0)
 			plane->format = manager->format;
 	}
 
@@ -903,7 +898,7 @@ xilinx_drm_plane_create(struct xilinx_drm_plane_manager *manager,
 	}
 
 	/* If there's no IP other than VDMA, pick the manager's format */
-	if (plane->format == -1)
+	if (plane->format == 0)
 		plane->format = manager->format;
 
 	/* initialize drm plane */
@@ -990,7 +985,7 @@ static int
 xilinx_drm_plane_init_manager(struct xilinx_drm_plane_manager *manager)
 {
 	unsigned int format;
-	uint32_t drm_format;
+	u32 drm_format;
 	int ret = 0;
 
 	if (manager->osd) {
@@ -1066,7 +1061,7 @@ xilinx_drm_plane_probe_manager(struct drm_device *drm)
 	if (IS_ERR(manager->dp_sub)) {
 		DRM_DEBUG_KMS("failed to get a dp_sub\n");
 		return ERR_CAST(manager->dp_sub);
-	} else if (manager->dp_sub != NULL) {
+	} else if (manager->dp_sub) {
 		manager->default_alpha = XILINX_DRM_DP_SUB_MAX_ALPHA;
 	}
 

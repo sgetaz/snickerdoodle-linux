@@ -14,10 +14,12 @@
 #include <drm/drmP.h>
 #include <linux/component.h>
 #include <linux/device.h>
+#include <linux/list.h>
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/phy/phy.h>
 #include <video/videomode.h>
+#include "xilinx_drm_sdi.h"
 #include "xilinx_vtc.h"
 
 /* SDI register offsets */
@@ -104,11 +106,17 @@
 #define	XSDI_TX_MUX_16STREAM_12G		4
 
 #define PIXELS_PER_CLK				2
-#define XST352_PROG_SHIFT			6
+#define XSDI_CH_SHIFT				29
+#define XST352_PROG_PIC_MASK			BIT(6)
+#define XST352_PROG_TRANS_MASK			BIT(7)
+#define XST352_2048_SHIFT			BIT(6)
 #define ST352_BYTE3				0x00
 #define ST352_BYTE4				0x01
 #define INVALID_VALUE				-1
 #define GT_TIMEOUT				500
+
+static LIST_HEAD(xilinx_sdi_list);
+static DEFINE_MUTEX(xilinx_sdi_lock);
 /**
  * enum payload_line_1 - Payload Ids Line 1 number
  * @PAYLD_LN1_HD_3_6_12G:	line 1 HD,3G,6G or 12G mode value
@@ -161,6 +169,9 @@ enum sdi_modes {
  * @mode_flags: SDI operation mode related flags
  * @wait_event: wait event
  * @event_received: wait event status
+ * @list: entry in the global SDI subsystem list
+ * @vblank_fn: vblank handler
+ * @vblank_data: vblank data to be used in vblank_fn
  * @sdi_mode: configurable SDI mode parameter, supported values are:
  *		0 - HD
  *		1 - SD
@@ -184,6 +195,9 @@ struct xilinx_sdi {
 	u32 mode_flags;
 	wait_queue_head_t wait_event;
 	bool event_received;
+	struct list_head list;
+	void (*vblank_fn)(void *);
+	void *vblank_data;
 	struct drm_property *sdi_mode;
 	u32 sdi_mod_prop_val;
 	struct drm_property *sdi_data_strm;
@@ -196,8 +210,8 @@ struct xilinx_sdi {
  * struct xilinx_sdi_display_config - SDI supported modes structure
  * @mode: drm display mode
  * @st352_byt2: st352 byte 2 value
- *		index 0 : value for fractional fps
- *		index 1 : value for integeral fps
+ *		index 0 : value for integral fps
+ *		index 1 : value for fractional fps
  * @st352_byt1: st352 byte 1 value
  *		index 0 : value for HD mode
  *		index 1 : value for SD mode
@@ -218,24 +232,37 @@ struct xlnx_sdi_display_config {
 static const struct xlnx_sdi_display_config xlnx_sdi_modes[] = {
 	/* 0 - dummy, VICs start at 1 */
 	{ },
+	/* SD: 720x480i@60Hz */
+	{{ DRM_MODE("720x480i", DRM_MODE_TYPE_DRIVER, 13500, 720, 739,
+		   801, 858, 0, 240, 244, 247, 262, 0,
+		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC |
+		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLCLK),
+		   .vrefresh = 60, }, {0x7, 0x6},
+		   {0x81, 0x81, 0x81, 0x81, 0x81, 0x81} },
 	/* SD: 720x576i@50Hz */
 	{{ DRM_MODE("720x576i", DRM_MODE_TYPE_DRIVER, 13500, 720, 732,
-		   795, 864, 0, 576, 580, 586, 625, 0,
+		   795, 864, 0, 288, 290, 293, 312, 0,
 		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC |
 		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLCLK),
 		   .vrefresh = 50, }, {0x9, 0x9},
 		   {0x81, 0x81, 0x81, 0x81, 0x81, 0x81} },
 	/* HD: 1280x720@25Hz */
-	{{ DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74250, 1280, 3700,
-		   3740, 3960, 0, 720, 725, 730, 750, 0,
+	{{ DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74250, 1280, 2250,
+		   2990, 3960, 0, 720, 725, 730, 750, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
 		   .vrefresh = 25, }, {0x5, 0x5},
 		   {0x84, 0x84, 0x88, 0x84, 0x84, 0x84} },
-	/* HD: 1280x720@30Hz */
-	 {{ DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74250, 1280, 3040,
-		   3080, 3300, 0, 720, 725, 730, 750, 0,
+	/* HD: 1280x720@24Hz */
+	{{ DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74250, 1280, 2250,
+		   3155, 4125, 0, 720, 725, 730, 750, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
-		   .vrefresh = 30, }, {0x6, 0x7},
+		   .vrefresh = 24, }, {0x3, 0x2},
+		   {0x84, 0x84, 0x88, 0x84, 0x84, 0x84} },
+	/* HD: 1280x720@30Hz */
+	 {{ DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74250, 1280, 2250,
+		   2330, 3300, 0, 720, 725, 730, 750, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 30, }, {0x7, 0x6},
 		   {0x84, 0x84, 0x88, 0x84, 0x84, 0x84} },
 	/* HD: 1280x720@50Hz */
 	{{ DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74250, 1280, 1720,
@@ -253,7 +280,7 @@ static const struct xlnx_sdi_display_config xlnx_sdi_modes[] = {
 	{{ DRM_MODE("1920x1080", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2558,
 		   2602, 2750, 0, 1080, 1084, 1089, 1125, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
-		   .vrefresh = 24, }, {0x2, 0x3},
+		   .vrefresh = 24, }, {0x3, 0x2},
 		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
 	/* HD: 1920x1080@25Hz */
 	{{ DRM_MODE("1920x1080", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2448,
@@ -265,21 +292,115 @@ static const struct xlnx_sdi_display_config xlnx_sdi_modes[] = {
 	{{ DRM_MODE("1920x1080", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2008,
 		   2052, 2200, 0, 1080, 1084, 1089, 1125, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
-		   .vrefresh = 30, }, {0x6, 0x7},
+		   .vrefresh = 30, }, {0x7, 0x6},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 1920x1080i@48Hz */
+	{{ DRM_MODE("1920x1080i", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2291,
+		   2379, 2750, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 48, }, {0x3, 0x2},
 		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
 	/* HD: 1920x1080i@50Hz */
 	{{ DRM_MODE("1920x1080i", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2448,
-		   2492, 2640, 0, 1080, 1084, 1094, 1125, 0,
+		   2492, 2640, 0, 540, 542, 547, 562, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
 		   DRM_MODE_FLAG_INTERLACE),
-		   .vrefresh = 50, }, {0x9, 0x9},
+		   .vrefresh = 50, }, {0x5, 0x5},
 		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
 	/* HD: 1920x1080i@60Hz */
 	{{ DRM_MODE("1920x1080i", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2008,
-		   2052, 2200, 0, 1080, 1084, 1094, 1125, 0,
+		   2052, 2200, 0, 540, 542, 547, 562, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
 		   DRM_MODE_FLAG_INTERLACE),
-		   .vrefresh = 60, }, {0xB, 0xA},
+		   .vrefresh = 60, }, {0x7, 0x6},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 1920x1080sf@24Hz */
+	{{ DRM_MODE("1920x1080sf", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2291,
+		   2379, 2750, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN),
+		   .vrefresh = 48, }, {0x3, 0x2},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 1920x1080sf@25Hz */
+	{{ DRM_MODE("1920x1080sf", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2448,
+		   2492, 2640, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN),
+		   .vrefresh = 50, }, {0x5, 0x5},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 1920x1080sf@30Hz */
+	{{ DRM_MODE("1920x1080sf", DRM_MODE_TYPE_DRIVER, 74250, 1920, 2008,
+		   2052, 2200, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN),
+		   .vrefresh = 60, }, {0x7, 0x6},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080i@48Hz */
+	{{ DRM_MODE("2048x1080i", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2377,
+		   2421, 2750, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 48, }, {0x3, 0x2},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080i@50Hz */
+	{{ DRM_MODE("2048x1080i", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2322,
+		   2366, 2640, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 50, }, {0x5, 0x5},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080i@60Hz */
+	{{ DRM_MODE("2048x1080i", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2114,
+		   2134, 2200, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 60, }, {0x7, 0x6},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080sf@24Hz */
+	{{ DRM_MODE("2048x1080sf", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2377,
+		   2421, 2750, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN),
+		   .vrefresh = 48, }, {0x3, 0x2},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080sf@25Hz */
+	{{ DRM_MODE("2048x1080sf", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2322,
+		   2366, 2640, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN),
+		   .vrefresh = 50, }, {0x5, 0x5},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080sf@30Hz */
+	{{ DRM_MODE("2048x1080sf", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2114,
+		   2134, 2200, 0, 540, 542, 547, 562, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN),
+		   .vrefresh = 60, }, {0x7, 0x6},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080@30Hz */
+	{{ DRM_MODE("2048x1080", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2114,
+		   2134, 2200, 0, 1080, 1084, 1089, 1125, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 30, }, {0x7, 0x6},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080@25Hz */
+	{{ DRM_MODE("2048x1080", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2448,
+		   2492, 2640, 0, 1080, 1084, 1089, 1125, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 25, }, {0x5, 0x5},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* HD: 2048x1080@24Hz */
+	{{ DRM_MODE("2048x1080", DRM_MODE_TYPE_DRIVER, 74250, 2048, 2558,
+		   2602, 2750, 0, 1080, 1084, 1089, 1125, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 24, }, {0x3, 0x2},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G: 1920x1080@48Hz */
+	{{ DRM_MODE("1920x1080", DRM_MODE_TYPE_DRIVER, 148500, 1920, 2558,
+		   2602, 2750, 0, 1080, 1084, 1089, 1125, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 48, }, {0x8, 0x4},
 		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
 	/* 3G: 1920x1080@50Hz */
 	{{ DRM_MODE("1920x1080", DRM_MODE_TYPE_DRIVER, 148500, 1920, 2448,
@@ -293,30 +414,138 @@ static const struct xlnx_sdi_display_config xlnx_sdi_modes[] = {
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
 		   .vrefresh = 60, }, {0xB, 0xA},
 		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G: 2048x1080@60Hz */
+	{{ DRM_MODE("2048x1080", DRM_MODE_TYPE_DRIVER, 148500, 2048, 2136,
+		   2180, 2200, 0, 1080, 1084, 1089, 1125, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 60, }, {0xB, 0xA},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G: 2048x1080@50Hz */
+	{{ DRM_MODE("2048x1080", DRM_MODE_TYPE_DRIVER, 148500, 2048, 2448,
+		   2492, 2640, 0, 1080, 1084, 1089, 1125, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 50, }, {0x9, 0x9},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G: 2048x1080@48Hz */
+	{{ DRM_MODE("2048x1080", DRM_MODE_TYPE_DRIVER, 148500, 2048, 2558,
+		   2602, 2750, 0, 1080, 1084, 1089, 1125, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 48, }, {0x8, 0x4},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G-B: 1920x1080i@96Hz */
+	{{ DRM_MODE("1920x1080i", DRM_MODE_TYPE_DRIVER, 148500, 1920, 2291,
+		   2379, 2750, 0, 1080, 1084, 1094, 1124, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 96, }, {0x8, 0x4},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G-B: 1920x1080i@100Hz */
+	{{ DRM_MODE("1920x1080i", DRM_MODE_TYPE_DRIVER, 148500, 1920, 2448,
+		   2492, 2640, 0, 1080, 1084, 1094, 1124, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 100, }, {0x9, 0x9},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G-B: 1920x1080i@120Hz */
+	{{ DRM_MODE("1920x1080i", DRM_MODE_TYPE_DRIVER, 148500, 1920, 2008,
+		   2052, 2200, 0, 1080, 1084, 1094, 1124, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 120, }, {0xB, 0xA},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G-B: 2048x1080i@96Hz */
+	{{ DRM_MODE("2048x1080i", DRM_MODE_TYPE_DRIVER, 148500, 2048, 2377,
+		   2421, 2750, 0, 1080, 1084, 1094, 1124, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 96, }, {0x8, 0x4},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G-B: 2048x1080i@100Hz */
+	{{ DRM_MODE("2048x1080i", DRM_MODE_TYPE_DRIVER, 148500, 2048, 2322,
+		   2366, 2640, 0, 1080, 1084, 1094, 1124, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 100, }, {0x9, 0x9},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
+	/* 3G-B: 2048x1080i@120Hz */
+	{{ DRM_MODE("2048x1080i", DRM_MODE_TYPE_DRIVER, 148500, 2048, 2114,
+		   2134, 2200, 0, 1080, 1084, 1094, 1124, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC |
+		   DRM_MODE_FLAG_INTERLACE),
+		   .vrefresh = 120, }, {0xB, 0xA},
+		   {0x85, 0x85, 0x89, 0x8A, 0xC1, 0xC1} },
 	/* 6G: 3840x2160@30Hz */
 	{{ DRM_MODE("3840x2160", DRM_MODE_TYPE_DRIVER, 297000, 3840, 4016,
 		   4104, 4400, 0, 2160, 2168, 2178, 2250, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
-		   .vrefresh = 30, }, {0x6, 0x7},
-		   {0x98, 0x98, 0x97, 0x98, 0x98, 0xCE} },
+		   .vrefresh = 30, }, {0x7, 0x6},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
 	/* 6G: 3840x2160@25Hz */
 	{{ DRM_MODE("3840x2160", DRM_MODE_TYPE_DRIVER, 297000, 3840, 4896,
 		   4984, 5280, 0, 2160, 2168, 2178, 2250, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
 		   .vrefresh = 25, }, {0x5, 0x5},
-		   {0x98, 0x98, 0x97, 0x98, 0x98, 0xCE} },
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
 	/* 6G: 3840x2160@24Hz */
 	{{ DRM_MODE("3840x2160", DRM_MODE_TYPE_DRIVER, 297000, 3840, 5116,
 		   5204, 5500, 0, 2160, 2168, 2178, 2250, 0,
 		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
-		   .vrefresh = 24, }, {0x2, 0x3},
-		   {0x98, 0x98, 0x97, 0x98, 0x98, 0xCE} },
-	/* 12G: 4096x2160@60Hz RB */
-	{{ DRM_MODE("4096x2160", DRM_MODE_TYPE_DRIVER, 556744, 4096, 4104,
-		   4136, 4176, 0, 2160, 2208, 2216, 2222, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC),
+		   .vrefresh = 24, }, {0x3, 0x2},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 6G: 4096x2160@24Hz */
+	{{ DRM_MODE("4096x2160", DRM_MODE_TYPE_DRIVER, 296704, 4096, 5116,
+		   5204, 5500, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 24, }, {0x3, 0x2},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 6G: 4096x2160@25Hz */
+	{{ DRM_MODE("4096x2160", DRM_MODE_TYPE_DRIVER, 297000, 4096, 5064,
+		   5152, 5280, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 25, }, {0x5, 0x5},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 6G: 4096x2160@30Hz */
+	{{ DRM_MODE("4096x2160", DRM_MODE_TYPE_DRIVER, 296704, 4096, 4184,
+		   4272, 4400, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 30, }, {0x7, 0x6},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 12G: 3840x2160@48Hz */
+	{{ DRM_MODE("3840x2160", DRM_MODE_TYPE_DRIVER, 594000, 3840, 5116,
+		   5204, 5500, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 48, }, {0x8, 0x4},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 12G: 3840x2160@50Hz */
+	{{ DRM_MODE("3840x2160", DRM_MODE_TYPE_DRIVER, 594000, 3840, 4896,
+		   4984, 5280, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 50, }, {0x9, 0x9},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 12G: 3840x2160@60Hz */
+	{{ DRM_MODE("3840x2160", DRM_MODE_TYPE_DRIVER, 594000, 3840, 4016,
+		   4104, 4400, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
 		   .vrefresh = 60, }, {0xB, 0xA},
-		   {0x98, 0x98, 0x97, 0x98, 0x98, 0xCE} },
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 12G: 4096x2160@48Hz */
+	{{ DRM_MODE("4096x2160", DRM_MODE_TYPE_DRIVER, 594000, 4096, 5116,
+		   5204, 5500, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 48, }, {0x8, 0x4},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 12G: 4096x2160@50Hz */
+	{{ DRM_MODE("4096x2160", DRM_MODE_TYPE_DRIVER, 594000, 4096, 5064,
+		   5152, 5280, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 50, }, {0x9, 0x9},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
+	/* 12G: 4096x2160@60Hz */
+	{{ DRM_MODE("4096x2160", DRM_MODE_TYPE_DRIVER, 593408, 4096, 4184,
+		   4272, 4400, 0, 2160, 2168, 2178, 2250, 0,
+		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC),
+		   .vrefresh = 60, }, {0xB, 0xA},
+		   {0x98, 0x98, 0x97, 0x98, 0xC0, 0xCE} },
 };
 
 #define connector_to_sdi(c) container_of(c, struct xilinx_sdi, connector)
@@ -765,6 +994,7 @@ static int xilinx_sdi_create_connector(struct drm_encoder *encoder)
 
 	connector->polled = DRM_CONNECTOR_POLL_HPD;
 	connector->interlace_allowed = true;
+	connector->doublescan_allowed = true;
 
 	ret = drm_connector_init(encoder->dev, connector,
 				 &xilinx_sdi_connector_funcs,
@@ -839,20 +1069,28 @@ static u32 xilinx_sdi_calc_st352_payld(struct xilinx_sdi *sdi,
 				       struct drm_display_mode *mode)
 {
 	u8 byt1, byt2;
-	u16 is_p, smpl_r;
+	u16 is_p;
 	u32 id, sdi_mode = sdi->sdi_mod_prop_val;
 	bool is_frac = sdi->is_frac_prop_val;
+	u32 byt3 = ST352_BYTE3;
 
 	id = xilinx_sdi_get_mode_id(mode);
 	dev_dbg(sdi->dev, "mode id: %d\n", id);
+	if (mode->hdisplay == 2048 || mode->hdisplay == 4096)
+		byt3 |= XST352_2048_SHIFT;
 	/* byte 2 calculation */
 	is_p = !(mode->flags & DRM_MODE_FLAG_INTERLACE);
-	smpl_r = xlnx_sdi_modes[id].st352_byt2[is_frac];
-	byt2 = (is_p << XST352_PROG_SHIFT) | smpl_r;
+	byt2 = xlnx_sdi_modes[id].st352_byt2[is_frac];
+	if ((sdi_mode == XSDI_MODE_3GB) ||
+	    (mode->flags & DRM_MODE_FLAG_DBLSCAN) || is_p)
+		byt2 |= XST352_PROG_PIC_MASK;
+	if (is_p && (mode->vtotal >= 1125))
+		byt2 |= XST352_PROG_TRANS_MASK;
+
 	/* byte 1 calculation */
 	byt1 = xlnx_sdi_modes[id].st352_byt1[sdi_mode];
 
-	return (ST352_BYTE4 << 24 | ST352_BYTE3 << 16 | byt2 << 8 | byt1);
+	return (ST352_BYTE4 << 24 | byt3 << 16 | byt2 << 8 | byt1);
 }
 
 /**
@@ -879,8 +1117,11 @@ static void xilinx_sdi_mode_set(struct drm_encoder *encoder,
 	payload = xilinx_sdi_calc_st352_payld(sdi, adjusted_mode);
 	dev_dbg(sdi->dev, "payload : %0x\n", payload);
 
-	for (i = 0; i < SDI_MAX_DATASTREAM; i++)
+	for (i = 0; i < sdi->sdi_data_strm_prop_val / 2; i++) {
+		if (sdi->sdi_mod_prop_val == XSDI_MODE_3GB)
+			payload |= (i << 1) << XSDI_CH_SHIFT;
 		xilinx_sdi_set_payload_data(sdi, i, payload);
+	}
 
 	/* UHDSDI is fixed 2 pixels per clock, horizontal timings div by 2 */
 	vm.hactive = adjusted_mode->hdisplay / PIXELS_PER_CLK;
@@ -898,6 +1139,13 @@ static void xilinx_sdi_mode_set(struct drm_encoder *encoder,
 			 adjusted_mode->vsync_end;
 	vm.vsync_len = adjusted_mode->vsync_end -
 		       adjusted_mode->vsync_start;
+	vm.flags = 0;
+	if (adjusted_mode->flags & DRM_MODE_FLAG_INTERLACE)
+		vm.flags |= DISPLAY_FLAGS_INTERLACED;
+	if (adjusted_mode->flags & DRM_MODE_FLAG_PHSYNC)
+		vm.flags |= DISPLAY_FLAGS_HSYNC_LOW;
+	if (adjusted_mode->flags & DRM_MODE_FLAG_PVSYNC)
+		vm.flags |= DISPLAY_FLAGS_VSYNC_LOW;
 
 	xilinx_vtc_config_sig(sdi->vtc, &vm);
 }
@@ -996,6 +1244,121 @@ static const struct component_ops xilinx_sdi_component_ops = {
 	.unbind	= xilinx_sdi_unbind,
 };
 
+static irqreturn_t xilinx_sdi_vblank_handler(int irq, void *data)
+{
+	struct xilinx_sdi *sdi = (struct xilinx_sdi *)data;
+	u32 intr = xilinx_vtc_intr_get(sdi->vtc);
+
+	if (!intr)
+		return IRQ_NONE;
+
+	if (sdi->vblank_fn)
+		sdi->vblank_fn(sdi->vblank_data);
+
+	xilinx_vtc_intr_clear(sdi->vtc, intr);
+	return IRQ_HANDLED;
+}
+
+/**
+ * xilinx_drm_sdi_enable_vblank - Enable the vblank handling
+ * @sdi: SDI subsystem
+ * @vblank_fn: callback to be called on vblank event
+ * @vblank_data: data to be used in @vblank_fn
+ *
+ * This function register the vblank handler, and the handler will be triggered
+ * on vblank event after.
+ */
+void xilinx_drm_sdi_enable_vblank(struct xilinx_sdi *sdi,
+				  void (*vblank_fn)(void *),
+				  void *vblank_data)
+{
+	sdi->vblank_fn = vblank_fn;
+	sdi->vblank_data = vblank_data;
+	xilinx_vtc_vblank_enable(sdi->vtc);
+}
+EXPORT_SYMBOL_GPL(xilinx_drm_sdi_enable_vblank);
+
+/**
+ * xilinx_drm_sdi_disable_vblank - Disable the vblank handling
+ * @sdi: SDI subsystem
+ *
+ * Disable the vblank handler. The vblank handler and data are unregistered.
+ */
+void xilinx_drm_sdi_disable_vblank(struct xilinx_sdi *sdi)
+{
+	sdi->vblank_fn = NULL;
+	sdi->vblank_data = NULL;
+	xilinx_vtc_vblank_disable(sdi->vtc);
+}
+
+/**
+ * xilinx_sdi_register_device - Register the SDI subsystem to the global list
+ * @sdi: SDI subsystem
+ *
+ * Register the SDI subsystem instance to the global list
+ */
+static void xilinx_sdi_register_device(struct xilinx_sdi *sdi)
+{
+	mutex_lock(&xilinx_sdi_lock);
+	list_add_tail(&sdi->list, &xilinx_sdi_list);
+	mutex_unlock(&xilinx_sdi_lock);
+}
+
+/**
+ * xilinx_drm_sdi_of_get - Get the SDI subsystem instance
+ * @np: parent device node
+ *
+ * This function searches and returns a SDI subsystem structure for
+ * the parent device node, @np. The SDI subsystem node should be a child node
+ * of @np, with 'xlnx,v-smpte-uhdsdi-tx-ss' property pointing to the SDI
+ * device node. An instance can be shared by multiple users.
+ *
+ * Return: corresponding SDI subsystem structure if found. NULL if
+ * the device node doesn't have 'xlnx,v-smpte-uhdsdi-tx-ss' property, or
+ * -EPROBE_DEFER error pointer if the the SDI subsystem isn't found.
+ */
+struct xilinx_sdi *xilinx_drm_sdi_of_get(struct device_node *np)
+{
+	struct xilinx_sdi *found = NULL;
+	struct xilinx_sdi *sdi;
+	struct device_node *ep_node, *sdi_node;
+
+	ep_node = of_find_node_by_name(np, "endpoint");
+	if (!ep_node)
+		return NULL;
+	sdi_node = of_graph_get_remote_port_parent(ep_node);
+	of_node_put(ep_node);
+	if (!sdi_node)
+		return NULL;
+
+	mutex_lock(&xilinx_sdi_lock);
+	list_for_each_entry(sdi, &xilinx_sdi_list, list) {
+		if (sdi->dev->of_node == sdi_node) {
+			found = sdi;
+			break;
+		}
+	}
+	mutex_unlock(&xilinx_sdi_lock);
+
+	of_node_put(sdi_node);
+	if (!found)
+		return ERR_PTR(-EPROBE_DEFER);
+	return found;
+}
+
+/**
+ * xilinx_sdi_unregister_device - Unregister the SDI subsystem instance
+ * @sdi: SDI subsystem
+ *
+ * Unregister the SDI subsystem instance from the global list
+ */
+static void xilinx_sdi_unregister_device(struct xilinx_sdi *sdi)
+{
+	mutex_lock(&xilinx_sdi_lock);
+	list_del(&sdi->list);
+	mutex_unlock(&xilinx_sdi_lock);
+}
+
 static int xilinx_sdi_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1042,14 +1405,27 @@ static int xilinx_sdi_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
+	irq = platform_get_irq(pdev, 1); /* vblank interrupt */
+	if (irq < 0)
+		return irq;
+	ret = devm_request_threaded_irq(sdi->dev, irq, NULL,
+					xilinx_sdi_vblank_handler, IRQF_ONESHOT,
+					"sdiTx-vblank", sdi);
+	if (ret < 0)
+		return ret;
+
 	init_waitqueue_head(&sdi->wait_event);
 	sdi->event_received = false;
 
+	xilinx_sdi_register_device(sdi);
 	return component_add(dev, &xilinx_sdi_component_ops);
 }
 
 static int xilinx_sdi_remove(struct platform_device *pdev)
 {
+	struct xilinx_sdi *sdi = platform_get_drvdata(pdev);
+
+	xilinx_sdi_unregister_device(sdi);
 	component_del(&pdev->dev, &xilinx_sdi_component_ops);
 
 	return 0;
