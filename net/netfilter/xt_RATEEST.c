@@ -66,25 +66,17 @@ struct xt_rateest *xt_rateest_lookup(const char *name)
 		spin_unlock_bh(&info->est2->lock);
 	}
 
-	switch (info->mode) {
-	case XT_RATEEST_MATCH_LT:
-		if (info->flags & XT_RATEEST_MATCH_BPS)
-			ret &= bps1 < bps2;
-		if (info->flags & XT_RATEEST_MATCH_PPS)
-			ret &= pps1 < pps2;
-		break;
-	case XT_RATEEST_MATCH_GT:
-		if (info->flags & XT_RATEEST_MATCH_BPS)
-			ret &= bps1 > bps2;
-		if (info->flags & XT_RATEEST_MATCH_PPS)
-			ret &= pps1 > pps2;
-		break;
-	case XT_RATEEST_MATCH_EQ:
-		if (info->flags & XT_RATEEST_MATCH_BPS)
-			ret &= bps1 == bps2;
-		if (info->flags & XT_RATEEST_MATCH_PPS)
-			ret &= pps1 == pps2;
-		break;
+void xt_rateest_put(struct xt_rateest *est)
+{
+	mutex_lock(&xt_rateest_mutex);
+	if (--est->refcnt == 0) {
+		hlist_del(&est->list);
+		gen_kill_estimator(&est->rate_est);
+		/*
+		 * gen_estimator est_timer() might access est->lock or bstats,
+		 * wait a RCU grace period before freeing 'est'
+		 */
+		kfree_rcu(est, rcu);
 	}
 
 	ret ^= info->flags & XT_RATEEST_MATCH_INVERT ? true : false;
@@ -124,7 +116,7 @@ static int xt_rateest_mt_checkentry(const struct xt_mtchk_param *par)
 	if (!est1)
 		goto err1;
 
-	ret = gen_new_estimator(&est->bstats, NULL, &est->rstats,
+	ret = gen_new_estimator(&est->bstats, NULL, &est->rate_est,
 				&est->lock, NULL, &cfg.opt);
 	if (ret < 0)
 		goto err2;
@@ -152,10 +144,11 @@ static struct xt_match xt_rateest_mt_reg __read_mostly = {
 	.name       = "rateest",
 	.revision   = 0,
 	.family     = NFPROTO_UNSPEC,
-	.match      = xt_rateest_mt,
-	.checkentry = xt_rateest_mt_checkentry,
-	.destroy    = xt_rateest_mt_destroy,
-	.matchsize  = sizeof(struct xt_rateest_match_info),
+	.target     = xt_rateest_tg,
+	.checkentry = xt_rateest_tg_checkentry,
+	.destroy    = xt_rateest_tg_destroy,
+	.targetsize = sizeof(struct xt_rateest_target_info),
+	.usersize   = offsetof(struct xt_rateest_target_info, est),
 	.me         = THIS_MODULE,
 };
 

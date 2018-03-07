@@ -90,7 +90,7 @@
 #define ECAM_DEV_NUM_SHIFT		12
 
 /* Number of MSI IRQs */
-#define XILINX_NUM_MSI_IRQS		128
+#define XILINX_NUM_MSI_IRQS		32
 #define INTX_NUM                        4
 
 struct xilinx_msi {
@@ -218,8 +218,8 @@ static void xilinx_pcie_enable_msi(struct xilinx_pcie_port *port)
 
 	msi->msi_pages = __get_free_pages(GFP_KERNEL, 0);
 	msg_addr = virt_to_phys((void *)msi->msi_pages);
-	pcie_write(port, 0x0, XILINX_PCIE_REG_MSIBASE1);
-	pcie_write(port, msg_addr, XILINX_PCIE_REG_MSIBASE2);
+	pcie_write(port, upper_32_bits(msg_addr), XILINX_PCIE_REG_MSIBASE1);
+	pcie_write(port, lower_32_bits(msg_addr), XILINX_PCIE_REG_MSIBASE2);
 }
 
 /**
@@ -243,6 +243,7 @@ static int xilinx_pcie_intx_map(struct irq_domain *domain, unsigned int irq,
 /* INTx IRQ Domain operations */
 static const struct irq_domain_ops intx_domain_ops = {
 	.map = xilinx_pcie_intx_map,
+	.xlate = pci_irqd_intx_xlate,
 };
 
 /**
@@ -303,7 +304,7 @@ static irqreturn_t xilinx_pcie_intr_handler(int irq, void *data)
 
 		for_each_set_bit(bit, &intr_val, INTX_NUM)
 			generic_handle_irq(irq_find_mapping(port->leg_domain,
-							    bit + 1));
+							    bit));
 	}
 
 	if (status & XILINX_PCIE_INTR_MSI) {
@@ -325,7 +326,10 @@ static irqreturn_t xilinx_pcie_intr_handler(int irq, void *data)
 
 			if (IS_ENABLED(CONFIG_PCI_MSI)) {
 				/* Handle MSI Interrupt */
-				generic_handle_irq(msi_data);
+				val = irq_find_mapping(port->msi.dev_domain,
+						       msi_data);
+				if (val)
+					generic_handle_irq(val);
 			}
 		}
 	}
@@ -387,7 +391,7 @@ static void xilinx_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 	msi_addr = virt_to_phys((void *)msi->msi_pages);
 	msg->address_lo = lower_32_bits(msi_addr);
 	msg->address_hi = upper_32_bits(msi_addr);
-	msg->data = data->irq;
+	msg->data = data->hwirq;
 }
 
 static int xilinx_msi_set_affinity(struct irq_data *irq_data,
@@ -598,14 +602,16 @@ static int xilinx_pcie_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct pci_bus *bus;
 	struct pci_bus *child;
-
+	struct pci_host_bridge *bridge;
 	int err;
 	resource_size_t iobase = 0;
 	LIST_HEAD(res);
 
-	port = devm_kzalloc(dev, sizeof(*port), GFP_KERNEL);
-	if (!port)
-		return -ENOMEM;
+	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*port));
+	if (!bridge)
+		return -ENODEV;
+
+	port = pci_host_bridge_priv(bridge);
 
 	port->dev = dev;
 
@@ -630,19 +636,33 @@ static int xilinx_pcie_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	bus = pci_create_root_bus(&pdev->dev, 0,
-				  &xilinx_pcie_ops, port, &res);
-	if (!bus)
-		return -ENOMEM;
+	err = devm_request_pci_bus_resources(dev, &res);
+	if (err)
+		goto error;
 
-	pci_scan_child_bus(bus);
+	list_splice_init(&res, &bridge->windows);
+	bridge->dev.parent = dev;
+	bridge->sysdata = port;
+	bridge->busnr = port->root_busno;
+	bridge->ops = &xilinx_pcie_ops;
+	bridge->map_irq = of_irq_parse_and_map_pci;
+	bridge->swizzle_irq = pci_common_swizzle;
+
+	err = pci_scan_root_bus_bridge(bridge);
+	if (err)
+		goto error;
+
+	bus = bridge->bus;
+
 	pci_assign_unassigned_bus_resources(bus);
 	list_for_each_entry(child, &bus->children, node)
 		pcie_bus_configure_settings(child);
 	pci_bus_add_devices(bus);
-	platform_set_drvdata(pdev, port);
-
 	return 0;
+
+error:
+	pci_free_resource_list(&res);
+	return err;
 }
 
 static const struct of_device_id xilinx_pcie_of_match[] = {
