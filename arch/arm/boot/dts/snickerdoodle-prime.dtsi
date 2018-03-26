@@ -1,0 +1,35 @@
+/**
+ * Copyright (c) 2016 krtkl inc.
+ *
+ * snickerdoodle prime base device tree source
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
+ */
+
+/include/ "snickerdoodle.dtsi"
+/ {
+        model = "snickerdoodle Prime";
+        compatible = "krtkl,snickerdoodle-prime", "krtkl,snickerdoodle", "xlnx,zynq-7000";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x20000000>;
+	};
+};
+
+&wlcore {
+	compatible = "wlcore", "ti,wl1801";
+};
+
+&spi0 {
+  is-decoded-cs = <0>;
+  num-cs = <1>;
+  status = "okay";
+  spidev@0x00 {
+    compatible = "spidev";
+    spi-max-frequency = <1000000>;
+    reg = <0>;
+  };
+};
